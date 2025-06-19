@@ -1,0 +1,197 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+# Import modules
+from data_preprocessing_module import DataPreprocessor
+from att_lstm_module import ATTLSTMModel
+from nsgm1n_module import NSGM1NModel
+from ensemble_module import EnsembleModel
+
+# --- Module 5: Integrate and Test the Full Model ---
+
+class FullStockPredictionModel:
+    def __init__(self, stock_ticker="AEL", look_back=60, lstm_units=64, dense_units=32, 
+                 lstm_learning_rate=0.001, ensemble_optimization_method="mse_optimization", random_seed=42):
+        self.stock_ticker = stock_ticker
+        self.look_back = look_back
+        self.lstm_units = lstm_units
+        self.dense_units = dense_units
+        self.lstm_learning_rate = lstm_learning_rate
+        self.ensemble_optimization_method = ensemble_optimization_method
+        self.random_seed = random_seed
+
+        self.data_preprocessor = DataPreprocessor(stock_ticker=self.stock_ticker, random_seed=self.random_seed)
+        self.att_lstm_model = None # Initialized after data preprocessing to get input_shape
+        self.nsgm_model = NSGM1NModel()
+        self.ensemble_model = EnsembleModel(optimization_method=self.ensemble_optimization_method, random_seed=self.random_seed)
+        self.data_scaler = None
+        self.processed_df = None
+
+    def _create_sequences(self, data, target_column_name="Close"):
+        # Ensure target_column_name is in data.columns
+        if target_column_name not in data.columns:
+            raise ValueError(f"Target column '{target_column_name}' not found in data.")
+
+        target_column_index = data.columns.get_loc(target_column_name)
+        
+        X, y = [], []
+        for i in range(len(data) - self.look_back):
+            X.append(data.iloc[i:(i + self.look_back), :].values)
+            y.append(data.iloc[i + self.look_back, target_column_index])
+        return np.array(X), np.array(y)
+
+    def train_and_evaluate(self, epochs=50, batch_size=32, test_size=0.2, val_size=0.25):
+        print("\n--- Starting Full Model Training and Evaluation ---")
+
+        # 1. Data Acquisition and Preprocessing
+        self.processed_df, self.data_scaler = self.data_preprocessor.preprocess()
+        if self.processed_df.empty:
+            print("Error: Preprocessed data is empty. Aborting training.")
+            return
+
+        # Assuming 'Close' is the target column and is present in processed_df
+        target_column_name = 'Close'
+        if target_column_name not in self.processed_df.columns:
+            print(f"Error: Target column '{target_column_name}' not found in processed data. Aborting training.")
+            return
+
+        # Create sequences for LSTM and NSGM (if NSGM uses sequences)
+        # For NSGM, we need the original data for training, not sequences.
+        # For LSTM, we need sequences.
+        X_seq, y_seq = self._create_sequences(self.processed_df, target_column_name=target_column_name)
+
+        # Split data into training, validation, and test sets
+        # Ensure temporal split for time series data
+        X_train_seq, X_test_seq, y_train_seq, y_test_seq = train_test_split(
+            X_seq, y_seq, test_size=test_size, random_state=self.random_seed, shuffle=False
+        )
+        X_train_seq, X_val_seq, y_train_seq, y_val_seq = train_test_split(
+            X_train_seq, y_train_seq, test_size=val_size, random_state=self.random_seed, shuffle=False
+        ) # val_size of remaining train_size
+
+        print(f"\nData split shapes:")
+        print(f"X_train_seq: {X_train_seq.shape}, y_train_seq: {y_train_seq.shape}")
+        print(f"X_val_seq: {X_val_seq.shape}, y_val_seq: {y_val_seq.shape}")
+        print(f"X_test_seq: {X_test_seq.shape}, y_test_seq: {y_test_seq.shape}")
+
+        # 2. Train Attention-Enhanced LSTM (ATT-LSTM) Module
+        input_shape_lstm = (X_train_seq.shape[1], X_train_seq.shape[2]) # (timesteps, features)
+        self.att_lstm_model = ATTLSTMModel(
+            input_shape=input_shape_lstm, 
+            lstm_units=self.lstm_units, 
+            dense_units=self.dense_units, 
+            learning_rate=self.lstm_learning_rate, 
+            look_back=self.look_back,
+            random_seed=self.random_seed
+        )
+        self.att_lstm_model.build_model()
+        self.att_lstm_model.train(X_train_seq, y_train_seq, X_val_seq, y_val_seq, epochs=epochs, batch_size=batch_size)
+
+        # Predict on validation and test sets for LSTM
+        att_lstm_val_preds = self.att_lstm_model.predict(X_val_seq).flatten()
+        att_lstm_test_preds = self.att_lstm_model.predict(X_test_seq).flatten()
+
+        # 3. Train Cyclic Multidimensional Gray Model (NSGM(1,N)) Module
+        # NSGM(1,N) trains on the full (non-sequential) data up to the training split point.
+        # The primary series for NSGM is 'Close', and related series are other features.
+        nsgm_train_data_end_idx = len(self.processed_df) - len(y_seq) + len(y_train_seq) # Index in processed_df corresponding to end of y_train_seq
+        nsgm_train_df = self.processed_df.iloc[:nsgm_train_data_end_idx]
+        
+        nsgm_X_train = nsgm_train_df.drop(columns=[target_column_name]).values
+        nsgm_y_train = nsgm_train_df[target_column_name].values
+
+        self.nsgm_model.train(nsgm_X_train, nsgm_y_train)
+
+        # Predict on validation and test sets for NSGM
+        # NSGM predicts one step at a time, requiring the previous 'look_back' actual values.
+        # We need to reconstruct the sequences for NSGM prediction from the original processed_df.
+        nsgm_val_preds = []
+        for i in range(len(X_val_seq)):
+            # Get the actual data points corresponding to the current validation sequence
+            # The sequence starts at processed_df.index[len(y_train_seq) + i]
+            # and goes back for 'look_back' steps.
+            start_idx_in_processed_df = len(self.processed_df) - len(y_seq) + len(y_train_seq) + i - self.look_back
+            end_idx_in_processed_df = start_idx_in_processed_df + self.look_back
+            current_nsgm_sequence = self.processed_df.iloc[start_idx_in_processed_df:end_idx_in_processed_df].values
+            nsgm_val_preds.append(self.nsgm_model.predict(current_nsgm_sequence))
+        nsgm_val_preds = np.array(nsgm_val_preds).flatten()
+
+        nsgm_test_preds = []
+        for i in range(len(X_test_seq)):
+            start_idx_in_processed_df = len(self.processed_df) - len(y_seq) + len(y_train_seq) + len(y_val_seq) + i - self.look_back
+            end_idx_in_processed_df = start_idx_in_processed_df + self.look_back
+            current_nsgm_sequence = self.processed_df.iloc[start_idx_in_processed_df:end_idx_in_processed_df].values
+            nsgm_test_preds.append(self.nsgm_model.predict(current_nsgm_sequence))
+        nsgm_test_preds = np.array(nsgm_test_preds).flatten()
+
+        # 4. Train Ensemble (Weighted Fusion) Module
+        self.ensemble_model.train_weights(att_lstm_val_preds, nsgm_val_preds, y_val_seq)
+
+        # 5. Make Final Ensemble Predictions on Test Set
+        ensemble_test_preds = self.ensemble_model.predict(att_lstm_test_preds, nsgm_test_preds)
+
+        # Inverse transform predictions and actual values to original scale
+        # Create dummy arrays for inverse transform, placing predictions/actuals in the 'Close' column
+        dummy_preds_lstm = np.zeros((len(att_lstm_test_preds), self.processed_df.shape[1]))
+        dummy_preds_lstm[:, self.processed_df.columns.get_loc(target_column_name)] = att_lstm_test_preds
+        original_att_lstm_test_preds = self.data_scaler.inverse_transform(dummy_preds_lstm)[:, self.processed_df.columns.get_loc(target_column_name)]
+
+        dummy_preds_nsgm = np.zeros((len(nsgm_test_preds), self.processed_df.shape[1]))
+        dummy_preds_nsgm[:, self.processed_df.columns.get_loc(target_column_name)] = nsgm_test_preds
+        original_nsgm_test_preds = self.data_scaler.inverse_transform(dummy_preds_nsgm)[:, self.processed_df.columns.get_loc(target_column_name)]
+
+        dummy_preds_ensemble = np.zeros((len(ensemble_test_preds), self.processed_df.shape[1]))
+        dummy_preds_ensemble[:, self.processed_df.columns.get_loc(target_column_name)] = ensemble_test_preds
+        original_ensemble_test_preds = self.data_scaler.inverse_transform(dummy_preds_ensemble)[:, self.processed_df.columns.get_loc(target_column_name)]
+
+        dummy_actuals = np.zeros((len(y_test_seq), self.processed_df.shape[1]))
+        dummy_actuals[:, self.processed_df.columns.get_loc(target_column_name)] = y_test_seq
+        original_y_test_seq = self.data_scaler.inverse_transform(dummy_actuals)[:, self.processed_df.columns.get_loc(target_column_name)]
+
+        # Evaluate performance
+        print("\n--- Model Performance on Test Set (Original Scale) ---")
+        
+        mse_lstm = mean_squared_error(original_y_test_seq, original_att_lstm_test_preds)
+        mae_lstm = mean_absolute_error(original_y_test_seq, original_att_lstm_test_preds)
+        print(f"ATT-LSTM - MSE: {mse_lstm:.4f}, MAE: {mae_lstm:.4f}")
+
+        mse_nsgm = mean_squared_error(original_y_test_seq, original_nsgm_test_preds)
+        mae_nsgm = mean_absolute_error(original_y_test_seq, original_nsgm_test_preds)
+        print(f"NSGM(1,N) - MSE: {mse_nsgm:.4f}, MAE: {mae_nsgm:.4f}")
+
+        mse_ensemble = mean_squared_error(original_y_test_seq, original_ensemble_test_preds)
+        mae_ensemble = mean_absolute_error(original_y_test_seq, original_ensemble_test_preds)
+        print(f"Ensemble Model - MSE: {mse_ensemble:.4f}, MAE: {mae_ensemble:.4f}")
+
+        print("\n--- Full Model Training and Evaluation Complete ---")
+
+        return {
+            "att_lstm_preds": original_att_lstm_test_preds,
+            "nsgm_preds": original_nsgm_test_preds,
+            "ensemble_preds": original_ensemble_test_preds,
+            "actual_values": original_y_test_seq,
+            "metrics": {
+                "lstm_mse": mse_lstm, "lstm_mae": mae_lstm,
+                "nsgm_mse": mse_nsgm, "nsgm_mae": mae_nsgm,
+                "ensemble_mse": mse_ensemble, "ensemble_mae": mae_ensemble
+            }
+        }
+
+# Example Usage (Run the full model)
+if __name__ == '__main__':
+    full_model = FullStockPredictionModel(
+        stock_ticker='AEL',
+        look_back=30, # Shorter look_back for faster simulation
+        lstm_units=32, # Smaller LSTM for faster simulation
+        dense_units=16, # Smaller Dense for faster simulation
+        ensemble_optimization_method='mse_optimization'
+    )
+    results = full_model.train_and_evaluate(
+        epochs=5, # Fewer epochs for faster simulation
+    )
+    print("\nFinal Ensemble Predictions (first 5):", results["ensemble_preds"][:5])
+    print("Actual Values (first 5):", results["actual_values"][:5])
+
+
