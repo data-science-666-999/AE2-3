@@ -8,6 +8,8 @@ from data_preprocessing_module import DataPreprocessor
 from att_lstm_module import ATTLSTMModel
 from nsgm1n_module import NSGM1NModel
 from ensemble_module import EnsembleModel
+import matplotlib.pyplot as plt
+import os
 
 # --- Module 5: Integrate and Test the Full Model ---
 
@@ -155,15 +157,59 @@ class FullStockPredictionModel:
         
         mse_lstm = mean_squared_error(original_y_test_seq, original_att_lstm_test_preds)
         mae_lstm = mean_absolute_error(original_y_test_seq, original_att_lstm_test_preds)
-        print(f"ATT-LSTM - MSE: {mse_lstm:.4f}, MAE: {mae_lstm:.4f}")
+        rmse_lstm = np.sqrt(mse_lstm)
+        print(f"ATT-LSTM - MSE: {mse_lstm:.4f}, MAE: {mae_lstm:.4f}, RMSE: {rmse_lstm:.4f}")
 
         mse_nsgm = mean_squared_error(original_y_test_seq, original_nsgm_test_preds)
         mae_nsgm = mean_absolute_error(original_y_test_seq, original_nsgm_test_preds)
-        print(f"NSGM(1,N) - MSE: {mse_nsgm:.4f}, MAE: {mae_nsgm:.4f}")
+        rmse_nsgm = np.sqrt(mse_nsgm)
+        print(f"NSGM(1,N) - MSE: {mse_nsgm:.4f}, MAE: {mae_nsgm:.4f}, RMSE: {rmse_nsgm:.4f}")
 
         mse_ensemble = mean_squared_error(original_y_test_seq, original_ensemble_test_preds)
         mae_ensemble = mean_absolute_error(original_y_test_seq, original_ensemble_test_preds)
-        print(f"Ensemble Model - MSE: {mse_ensemble:.4f}, MAE: {mae_ensemble:.4f}")
+        rmse_ensemble = np.sqrt(mse_ensemble)
+        print(f"Ensemble Model - MSE: {mse_ensemble:.4f}, MAE: {mae_ensemble:.4f}, RMSE: {rmse_ensemble:.4f}")
+
+        # Create a directory for plots if it doesn't exist
+        plots_dir = "prediction_plots"
+        os.makedirs(plots_dir, exist_ok=True)
+
+        # Generate and save plots
+        test_indices = self.processed_df.index[-len(original_y_test_seq):] # Get appropriate datetime index for plots
+
+        self._plot_predictions_vs_actuals_timeseries(
+            test_indices, original_y_test_seq, original_ensemble_test_preds,
+            "Ensemble Model Predictions vs Actuals",
+            os.path.join(plots_dir, "ensemble_preds_vs_actuals_timeseries.png")
+        )
+        self._plot_predictions_vs_actuals_timeseries(
+            test_indices, original_y_test_seq, original_att_lstm_test_preds,
+            "ATT-LSTM Model Predictions vs Actuals",
+            os.path.join(plots_dir, "att_lstm_preds_vs_actuals_timeseries.png")
+        )
+        self._plot_predictions_vs_actuals_timeseries(
+            test_indices, original_y_test_seq, original_nsgm_test_preds,
+            "NSGM(1,N) Model Predictions vs Actuals",
+            os.path.join(plots_dir, "nsgm_preds_vs_actuals_timeseries.png")
+        )
+        self._plot_predictions_vs_actuals_scatter(
+            original_y_test_seq, original_ensemble_test_preds,
+            "Ensemble Model Predictions vs Actuals",
+            os.path.join(plots_dir, "ensemble_preds_vs_actuals_scatter.png")
+        )
+
+        residuals_ensemble = original_y_test_seq - original_ensemble_test_preds
+        self._plot_residuals_timeseries(
+            test_indices, residuals_ensemble,
+            "Ensemble Model Residuals Over Time",
+            os.path.join(plots_dir, "ensemble_residuals_timeseries.png")
+        )
+        self._plot_residuals_histogram(
+            residuals_ensemble,
+            "Ensemble Model Distribution of Residuals",
+            os.path.join(plots_dir, "ensemble_residuals_histogram.png")
+        )
+        print(f"\nVisualizations saved to '{plots_dir}' directory.")
 
         print("\n--- Full Model Training and Evaluation Complete ---")
 
@@ -173,11 +219,65 @@ class FullStockPredictionModel:
             "ensemble_preds": original_ensemble_test_preds,
             "actual_values": original_y_test_seq,
             "metrics": {
-                "lstm_mse": mse_lstm, "lstm_mae": mae_lstm,
-                "nsgm_mse": mse_nsgm, "nsgm_mae": mae_nsgm,
-                "ensemble_mse": mse_ensemble, "ensemble_mae": mae_ensemble
+                "lstm_mse": mse_lstm, "lstm_mae": mae_lstm, "lstm_rmse": rmse_lstm,
+                "nsgm_mse": mse_nsgm, "nsgm_mae": mae_nsgm, "nsgm_rmse": rmse_nsgm,
+                "ensemble_mse": mse_ensemble, "ensemble_mae": mae_ensemble, "ensemble_rmse": rmse_ensemble
             }
         }
+
+    # --- Plotting Helper Methods ---
+    def _plot_predictions_vs_actuals_timeseries(self, x_values, actuals, predictions, title, filename):
+        plt.figure(figsize=(12, 6))
+        plt.plot(x_values, actuals, label='Actual Values', color='blue', marker='.', linestyle='-')
+        plt.plot(x_values, predictions, label='Predicted Values', color='red', marker='.', linestyle='--')
+        plt.title(title)
+        plt.xlabel("Time")
+        plt.ylabel("Stock Price (Original Scale)")
+        plt.legend()
+        plt.grid(True)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
+
+    def _plot_predictions_vs_actuals_scatter(self, actuals, predictions, title, filename):
+        plt.figure(figsize=(8, 8))
+        plt.scatter(actuals, predictions, alpha=0.5)
+        plt.plot([min(actuals), max(actuals)], [min(actuals), max(actuals)], color='red', linestyle='--') # y=x line
+        plt.title(title)
+        plt.xlabel("Actual Values")
+        plt.ylabel("Predicted Values")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
+
+    def _plot_residuals_timeseries(self, x_values, residuals, title, filename):
+        plt.figure(figsize=(12, 6))
+        plt.plot(x_values, residuals, label='Residuals (Actual - Predicted)', color='green', linestyle='-')
+        plt.axhline(0, color='red', linestyle='--', label='Zero Error')
+        plt.title(title)
+        plt.xlabel("Time")
+        plt.ylabel("Residual Value")
+        plt.legend()
+        plt.grid(True)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
+
+    def _plot_residuals_histogram(self, residuals, title, filename, bins=50):
+        plt.figure(figsize=(10, 6))
+        plt.hist(residuals, bins=bins, edgecolor='black', alpha=0.7)
+        plt.title(title)
+        plt.xlabel("Residual Value")
+        plt.ylabel("Frequency")
+        plt.grid(True)
+        plt.axvline(residuals.mean(), color='red', linestyle='dashed', linewidth=1, label=f'Mean: {residuals.mean():.2f}')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
 
 # Example Usage (Run the full model)
 if __name__ == '__main__':
