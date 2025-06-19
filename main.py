@@ -14,9 +14,11 @@ import os
 # --- Module 5: Integrate and Test the Full Model ---
 
 class FullStockPredictionModel:
-    def __init__(self, stock_ticker="AEL", look_back=60, lstm_units=64, dense_units=32, 
-                 lstm_learning_rate=0.001, ensemble_optimization_method="mse_optimization", random_seed=42):
+    def __init__(self, stock_ticker="AEL", years_of_data=5, look_back=60,
+                 lstm_units=64, dense_units=32, lstm_learning_rate=0.001,
+                 ensemble_optimization_method="mse_optimization", random_seed=42):
         self.stock_ticker = stock_ticker
+        self.years_of_data = years_of_data # New parameter
         self.look_back = look_back
         self.lstm_units = lstm_units
         self.dense_units = dense_units
@@ -24,7 +26,12 @@ class FullStockPredictionModel:
         self.ensemble_optimization_method = ensemble_optimization_method
         self.random_seed = random_seed
 
-        self.data_preprocessor = DataPreprocessor(stock_ticker=self.stock_ticker, random_seed=self.random_seed)
+        # Updated DataPreprocessor instantiation
+        self.data_preprocessor = DataPreprocessor(
+            stock_ticker=self.stock_ticker,
+            years_of_data=self.years_of_data,
+            random_seed=self.random_seed
+        )
         self.att_lstm_model = None # Initialized after data preprocessing to get input_shape
         self.nsgm_model = NSGM1NModel()
         self.ensemble_model = EnsembleModel(optimization_method=self.ensemble_optimization_method, random_seed=self.random_seed)
@@ -53,11 +60,13 @@ class FullStockPredictionModel:
             print("Error: Preprocessed data is empty. Aborting training.")
             return
 
-        # Assuming 'Close' is the target column and is present in processed_df
-        target_column_name = 'Close'
-        if target_column_name not in self.processed_df.columns:
-            print(f"Error: Target column '{target_column_name}' not found in processed data. Aborting training.")
+        # Determine target column name dynamically (it's the last column from DataPreprocessor)
+        if self.processed_df.empty:
+            print("Error: Preprocessed data is empty. Cannot determine target column. Aborting training.")
             return
+
+        target_column_name = self.processed_df.columns[-1]
+        print(f"Dynamically determined target column name: {target_column_name}")
 
         # Create sequences for LSTM and NSGM (if NSGM uses sequences)
         # For NSGM, we need the original data for training, not sequences.
@@ -173,9 +182,20 @@ class FullStockPredictionModel:
         # Create a directory for plots if it doesn't exist
         plots_dir = "prediction_plots"
         os.makedirs(plots_dir, exist_ok=True)
+        print(f"Ensured '{plots_dir}' directory exists at: {os.path.abspath(plots_dir)}")
+
 
         # Generate and save plots
         test_indices = self.processed_df.index[-len(original_y_test_seq):] # Get appropriate datetime index for plots
+
+        try:
+            self._plot_predictions_vs_actuals_timeseries(
+                test_indices, original_y_test_seq, original_ensemble_test_preds,
+                "Ensemble Model Predictions vs Actuals",
+                os.path.join(plots_dir, "ensemble_preds_vs_actuals_timeseries.png")
+            )
+        except Exception as e:
+            print(f"Error saving ensemble_preds_vs_actuals_timeseries.png: {e}")
 
         self._plot_predictions_vs_actuals_timeseries(
             test_indices, original_y_test_seq, original_ensemble_test_preds,
@@ -282,16 +302,37 @@ class FullStockPredictionModel:
 # Example Usage (Run the full model)
 if __name__ == '__main__':
     full_model = FullStockPredictionModel(
-        stock_ticker='AEL',
-        look_back=30, # Shorter look_back for faster simulation
-        lstm_units=32, # Smaller LSTM for faster simulation
-        dense_units=16, # Smaller Dense for faster simulation
-        ensemble_optimization_method='mse_optimization'
+        stock_ticker='^AEX',     # Using AEX index
+        years_of_data=5,         # As requested
+        look_back=60,            # Using a common look_back period
+        lstm_units=100,          # Increased LSTM units
+        dense_units=50,          # Increased Dense units
+        lstm_learning_rate=0.001,# Default learning rate
+        ensemble_optimization_method='mse_optimization',
+        random_seed=42
     )
+
+    # Train with more epochs, relying on EarlyStopping in ATTLSTMModel
+    # The ATTLSTMModel.train() method now defaults to 100 epochs and has early stopping.
+    # We can override epochs here if needed, or pass specific patience values for callbacks.
+    # For now, let's use the new defaults in ATTLSTMModel by not overriding `epochs` here,
+    # or explicitly set a higher number.
     results = full_model.train_and_evaluate(
-        epochs=5, # Fewer epochs for faster simulation
+        epochs=100, # Max epochs, EarlyStopping will likely trigger sooner.
+        batch_size=32
     )
-    print("\nFinal Ensemble Predictions (first 5):", results["ensemble_preds"][:5])
-    print("Actual Values (first 5):", results["actual_values"][:5])
+
+    if results: # Check if results were returned (not empty on error)
+        print("\nFinal Ensemble Predictions (first 5):", results["ensemble_preds"][:5])
+        print("Actual Values (first 5):", results["actual_values"][:5])
+        print("\nMetrics from the run:")
+        for model_name, metrics in results["metrics"].items():
+            if isinstance(metrics, float): # Handles individual metric entries like lstm_mse etc.
+                 print(f"  {model_name}: {metrics:.4f}")
+            else: # Should not happen with current structure but good for robustness
+                 print(f"  {model_name}: {metrics}")
+
+    else:
+        print("Model training and evaluation did not complete successfully.")
 
 
