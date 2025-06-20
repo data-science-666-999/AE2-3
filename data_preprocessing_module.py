@@ -144,8 +144,12 @@ class DataPreprocessor:
         # Volatility Features
         # Normalized ATR
         if 'ATR' in df.columns and 'Close' in df.columns:
-            # Avoid division by zero or very small close prices if necessary, though typically not an issue for stock prices
-            df['ATR_Normalized'] = df['ATR'] / df['Close'].replace(0, np.nan) # replace 0 with NaN to avoid division error, then fillna
+            # Ensure 'ATR' and 'Close' are Series for the division
+            atr_series = df['ATR'].squeeze() if isinstance(df['ATR'], pd.DataFrame) else df['ATR']
+            close_series = df['Close'].squeeze() if isinstance(df['Close'], pd.DataFrame) else df['Close']
+
+            # Avoid division by zero or very small close prices if necessary
+            df['ATR_Normalized'] = atr_series / close_series.replace(0, np.nan)
             df['ATR_Normalized'].fillna(method='bfill', inplace=True) # Backfill first for initial NaNs
             df['ATR_Normalized'].fillna(method='ffill', inplace=True) # Then ffill for any remaining
 
@@ -255,7 +259,7 @@ class DataPreprocessor:
         # Return the original df_cleaned (with all features before LASSO but after NaN drop)
         # as well, for potential volatility analysis on original features like ATR.
         # Also return the list of selected_feature_names.
-        return final_df_for_scaling, selected_feature_names, lasso_model, df_cleaned
+        return final_df_for_scaling, selected_feature_names, lasso, df_cleaned # Changed lasso_model to lasso
 
     def preprocess(self):
         # Step 1: Get raw data (potentially from cache)
