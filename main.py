@@ -170,7 +170,7 @@ class FullStockPredictionModel:
         metrics_log["overall_mse"] = mean_squared_error(original_y_test_seq, original_att_lstm_test_preds)
         metrics_log["overall_mae"] = mean_absolute_error(original_y_test_seq, original_att_lstm_test_preds)
         metrics_log["overall_rmse"] = np.sqrt(metrics_log["overall_mse"])
-        
+
         mean_actuals = np.mean(original_y_test_seq)
         if mean_actuals == 0:
             metrics_log["overall_rmse_perc_mean"] = float('inf')
@@ -326,128 +326,64 @@ class FullStockPredictionModel:
 
 # Example Usage (Run the full model)
 if __name__ == '__main__':
-    # Example of how one might loop through different LASSO alpha values:
-    # This part would typically be in a separate script that calls main.py.
-    # For demonstration, it's included here.
-    lasso_alpha_values_to_test = [0.001, 0.005, 0.01, 0.02] # Example values
-    all_results_by_alpha = {}
+    # --- Configurable parameters for a single test run ---
+    test_stock_ticker = '^AEX'
+    test_years_of_data = 3    # Changed to 3 years
+    test_look_back = 60
+    test_lasso_alpha = 0.005  # Using a default alpha for this run
+    test_epochs = 150
+    test_batch_size = 32
+    results = None # Initialize results to None
 
-    for alpha_val in lasso_alpha_values_to_test:
-        print(f"\n--- Running Full Model Training & Evaluation for LASSO alpha: {alpha_val} ---")
-        full_model = FullStockPredictionModel(
-            stock_ticker='^AEX',    # Using AEX index
-            years_of_data=10,       # Using 10 years of data
-            look_back=60,           # Common look_back period
-            random_seed=42,
-            lasso_alpha=alpha_val   # Pass current alpha
-        )
+    print(f"\n--- Starting Single Test Run: Ticker={test_stock_ticker}, Years={test_years_of_data}, LookBack={test_look_back}, Alpha={test_lasso_alpha} ---")
 
-        # Train with more epochs, relying on EarlyStopping in ATTLSTMModel
-        # Epochs and batch_size for the final training run after HPO.
-        # These could also be part of the tuned HPs.
-        print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
-        overall_start_time = time.time()
-        results = full_model.train_and_evaluate(
-            epochs=150, # Increased epochs for final training
-            batch_size=32
-        )
-        overall_end_time = time.time()
-        overall_duration = overall_end_time - overall_start_time
-        print(f"--- Full Model Training and Evaluation Took: {overall_duration:.2f} seconds ---")
+    full_model = FullStockPredictionModel(
+        stock_ticker=test_stock_ticker,
+        years_of_data=test_years_of_data,
+        look_back=test_look_back,
+        random_seed=42,
+        lasso_alpha=test_lasso_alpha
+    )
 
-        if results:
-            all_results_by_alpha[alpha_val] = results["metrics"]
-            print(f"\n--- Results for LASSO alpha: {alpha_val} ---")
-            if "metrics" in results:
-                for key, value in results["metrics"].items():
-                    if isinstance(value, float):
-                        print(f"  {key.replace('_', ' ').title()}: {value:.4f}")
-                    elif isinstance(value, list):
-                        print(f"  {key.replace('_', ' ').title()}: {value}")
-                    else:
-                        print(f"  {key.replace('_', ' ').title()}: {value}")
-            # Basic production readiness test (prediction speed) can also be run here if needed per alpha
-        else:
-            print(f"Model training and evaluation failed for alpha {alpha_val}.")
-        print(f"--- Finished Run for LASSO alpha: {alpha_val} ---\n")
-
-    # After the loop, print a summary or analyze all_results_by_alpha
-    print("\n\n--- Summary of Results by LASSO Alpha ---")
-    for alpha_val, metrics in all_results_by_alpha.items():
-        print(f"\nAlpha: {alpha_val}")
-        print(f"  Selected Features Count: {metrics.get('selected_features_count', 'N/A')}")
-        print(f"  Overall RMSE: {metrics.get('overall_rmse', 'N/A'):.4f}")
-        print(f"  Overall MAE: {metrics.get('overall_mae', 'N/A'):.4f}")
-        # Add other key metrics you want to compare
-
-    # --- Original single run (can be commented out or removed if using the loop) ---
-    # full_model = FullStockPredictionModel(
-    #     stock_ticker='^AEX',    # Using AEX index
-    #     years_of_data=10,       # Using 10 years of data
-    #     look_back=60,           # Common look_back period
-    #     random_seed=42,
-    #     lasso_alpha=0.005       # Default alpha if not looping
-    # )
-    # print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
-    # Epochs and batch_size for the final training run after HPO.
-    # These could also be part of the tuned HPs.
-    print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
     overall_start_time = time.time()
     results = full_model.train_and_evaluate(
-        epochs=150, # Increased epochs for final training
-        batch_size=32
+        epochs=test_epochs,
+        batch_size=test_batch_size
     )
     overall_end_time = time.time()
     overall_duration = overall_end_time - overall_start_time
     print(f"--- Full Model Training and Evaluation Took: {overall_duration:.2f} seconds ---")
 
     if results: # Check if results were returned (not empty on error)
-        print("\n--- Final Results ---")
+        print("\n--- Final Results from Test Run ---")
         if results.get("att_lstm_preds") is not None:
              print("Final ATT-LSTM Predictions (first 5):", results["att_lstm_preds"][:5])
         print("Actual Values (first 5):", results["actual_values"][:5])
 
-        print("\nDetailed Metrics from the run:")
+        print("\nDetailed Metrics from Test Run:")
         if "metrics" in results:
             for key, value in results["metrics"].items():
                 if isinstance(value, float):
                     print(f"  {key.replace('_', ' ').title()}: {value:.4f}")
                 elif isinstance(value, list):
-                     print(f"  {key.replace('_', ' ').title()}: {value}") # For list of feature names
+                     print(f"  {key.replace('_', ' ').title()}: {value}")
                 else:
                     print(f"  {key.replace('_', ' ').title()}: {value}")
         else:
             print("  Metrics not available.")
 
         # --- Production Readiness Testing (Simulated) ---
-        # Update the condition to check if full_model.att_lstm_model exists and has a model attribute
         if hasattr(full_model, 'att_lstm_model') and full_model.att_lstm_model and \
            hasattr(full_model.att_lstm_model, 'model') and full_model.att_lstm_model.model is not None:
             print("\n--- Production Readiness Testing (Prediction Speed) ---")
-
-            # Need X_test_seq from the train_and_evaluate scope, or re-generate a sample
-            # For simplicity, let's assume train_and_evaluate populates an X_test_seq that can be accessed
-            # or we retrieve it from the results if it was returned.
-            # However, train_and_evaluate doesn't return X_test_seq.
-            # So, we need to get a sample of X_test_seq.
-            # We can grab one from the `full_model` instance if it stores it, or re-create one.
-            # Let's assume `full_model.processed_df` and `full_model.look_back` are available.
-
             if full_model.processed_df is not None and not full_model.processed_df.empty:
-                # Create a sample sequence for testing prediction speed
-                # This is a simplified way; ideally, use an actual X_test_seq sample
                 num_features = full_model.processed_df.shape[1]
-                # Use float32 for dummy data, as TensorFlow models typically use this precision.
                 sample_raw_data = np.random.rand(full_model.look_back, num_features).astype(np.float32)
-
-                # For single instance prediction, the input needs to be (1, look_back, num_features)
                 single_instance_input = np.expand_dims(sample_raw_data, axis=0)
 
-                # Warm-up call for single instance prediction
                 print("Performing warm-up prediction for single instance...")
                 _ = full_model.att_lstm_model.predict(single_instance_input)
 
-                # Time single instance prediction
                 num_single_runs = 10
                 single_pred_times = []
                 print(f"Timing single instance prediction over {num_single_runs} runs...")
@@ -459,15 +395,12 @@ if __name__ == '__main__':
 
                 avg_single_pred_time_ms = np.mean(single_pred_times) * 1000
                 print(f"Average single instance prediction time: {avg_single_pred_time_ms:.2f} ms (over {num_single_runs} runs)")
-                if results and "metrics" in results: # Store if results dict is available
+                if results and "metrics" in results:
                     results["metrics"]["latency_single_pred_ms"] = avg_single_pred_time_ms
 
-                # Time batch instance prediction
                 batch_size_test = 32
-                # Create a batch of dummy data: (batch_size_test, look_back, num_features)
                 batch_input = np.random.rand(batch_size_test, full_model.look_back, num_features).astype(np.float32)
 
-                # Warm-up call for batch prediction
                 print(f"Performing warm-up prediction for batch (size {batch_size_test})...")
                 _ = full_model.att_lstm_model.predict(batch_input)
 
@@ -486,67 +419,29 @@ if __name__ == '__main__':
                 print(f"Average batch ({batch_size_test} instances) prediction time: {avg_batch_pred_time_total_ms:.2f} ms (total)")
                 print(f"Average per-instance prediction time in batch: {avg_batch_pred_time_per_instance_ms:.2f} ms (over {num_batch_runs} runs)")
 
-                if results and "metrics" in results: # Store if results dict is available
+                if results and "metrics" in results:
                     results["metrics"]["latency_batch_total_ms"] = avg_batch_pred_time_total_ms
                     results["metrics"]["latency_batch_per_instance_ms"] = avg_batch_pred_time_per_instance_ms
             else:
                 print("Could not perform prediction speed test: processed_df not available.")
         else:
             print("ATT-LSTM model not available for production readiness testing.")
+    else: # if results is None
+        print("Model training and evaluation did not complete successfully for the test run.")
 
-    # Storing results from the loop example for LASSO alpha
-    if 'all_results_by_alpha' in locals() and all_results_by_alpha:
-        print("\n\n--- Summary of Results by LASSO Alpha ---")
-        for alpha_val, metrics_summary in all_results_by_alpha.items():
-            print(f"\nAlpha: {alpha_val}")
-            print(f"  Selected Features Count: {metrics_summary.get('selected_features_count', 'N/A')}")
-            # Ensure metrics are float before formatting, or handle potential missing keys gracefully
-            overall_rmse_val = metrics_summary.get('overall_rmse', float('nan'))
-            overall_mae_val = metrics_summary.get('overall_mae', float('nan'))
-            print(f"  Overall RMSE: {overall_rmse_val:.4f}")
-            print(f"  Overall MAE: {overall_mae_val:.4f}")
-            # Add other key metrics you want to compare
-    elif not results: # If not in a loop and results is None (e.g. initial run failed)
-        print("Model training and evaluation did not complete successfully.")
+    # --- Previous loop for LASSO alpha (commented out for single test run) ---
+    # lasso_alpha_values_to_test = [0.001, 0.005, 0.01, 0.02]
+    # all_results_by_alpha = {}
+    # for alpha_val in lasso_alpha_values_to_test:
+    #     print(f"\n--- Running Full Model Training & Evaluation for LASSO alpha: {alpha_val} ---")
+    #     full_model = FullStockPredictionModel(
+    #         stock_ticker='^AEX',
+    #         years_of_data=10, # This was the original value in the loop
+    #         look_back=60,
+    #         random_seed=42,
+    #         lasso_alpha=alpha_val
+    #     )
+    #     # ... (rest of the loop as before, including train_and_evaluate, and storing/printing results) ...
+    #     # ... and the summary print for all_results_by_alpha ...
 
-    # --- Original single run (can be commented out or removed if using the loop) ---
-    # full_model = FullStockPredictionModel(
-    #     stock_ticker='^AEX',    # Using AEX index
-    #     years_of_data=10,       # Using 10 years of data
-    #     look_back=60,           # Common look_back period
-    #     random_seed=42,
-    #     lasso_alpha=0.005       # Default alpha if not looping
-    # )
-    # print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
-    # Epochs and batch_size for the final training run after HPO.
-    # These could also be part of the tuned HPs.
-    # print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
-    # overall_start_time = time.time()
-    # results = full_model.train_and_evaluate(
-    #     epochs=150, # Increased epochs for final training
-    #     batch_size=32
-    # )
-    # overall_end_time = time.time()
-    # overall_duration = overall_end_time - overall_start_time
-    # print(f"--- Full Model Training and Evaluation Took: {overall_duration:.2f} seconds ---")
-
-    # if results: # Check if results were returned (not empty on error)
-    #     print("\n--- Final Results ---")
-    #     if results.get("att_lstm_preds") is not None:
-    #          print("Final ATT-LSTM Predictions (first 5):", results["att_lstm_preds"][:5])
-    #     print("Actual Values (first 5):", results["actual_values"][:5])
-
-    #     print("\nDetailed Metrics from the run:")
-    #     if "metrics" in results:
-    #         for key, value in results["metrics"].items():
-    #             if isinstance(value, float):
-    #                 print(f"  {key.replace('_', ' ').title()}: {value:.4f}")
-    #             elif isinstance(value, list):
-    #                  print(f"  {key.replace('_', ' ').title()}: {value}") # For list of feature names
-    #             else:
-    #                 print(f"  {key.replace('_', ' ').title()}: {value}")
-    #     else:
-    #         print("  Metrics not available.")
-    # else:
-    #     print("Model training and evaluation did not complete successfully.")
 
