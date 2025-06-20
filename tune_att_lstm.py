@@ -59,9 +59,9 @@ def build_hypermodel(hp):
     raise NotImplementedError("This build_hypermodel(hp) should not be called directly by tuner if using the closure.")
 
 
-def main_tuner(stock_ticker="^AEX", years_of_data=2, project_name="stock_att_lstm_tuning_very_fast"): # Further reduced years
+def main_tuner(stock_ticker="^AEX", years_of_data=10, project_name="stock_att_lstm_hyperband_10y"):
     """
-    Main function to run KerasTuner.
+    Main function to run KerasTuner with Hyperband.
     """
     print(f"Starting hyperparameter tuning for {stock_ticker} using {years_of_data} years of data.")
 
@@ -166,29 +166,51 @@ def main_tuner(stock_ticker="^AEX", years_of_data=2, project_name="stock_att_lst
 
 
     # --- 2. KerasTuner Setup ---
-    tuner = kt.RandomSearch(
+    # Using Hyperband tuner
+    # max_epochs is the max epochs a single model can be trained for.
+    # factor is the reduction factor for the number of models and epochs per bracket.
+    # hyperband_iterations controls how many times the Hyperband algorithm is run.
+    # More iterations can lead to better results but take longer.
+    tuner = kt.Hyperband(
         hypermodel=build_hypermodel_with_shape,
         objective='val_loss',
-        max_trials=3,  # Further reduced max_trials
-        executions_per_trial=1,
+        max_epochs=81, # Max epochs for the best models (e.g., factor=3, iterations=1 -> 3^0*X, 3^1*X, 3^2*X, 3^3*X, 3^4*X. If X=1, then 1,3,9,27,81)
+                       # A common setup: max_epochs=81, factor=3. This implies configurations are trained for 1, 3, 9, 27, 81 epochs.
+                       # Or, if max_epochs is total for one config, then for Hyperband it's max_epochs for the full training of one version.
+                       # KerasTuner Hyperband: max_epochs is the number of epochs to train a model for in the last bracket.
+        factor=3,
+        hyperband_iterations=2, # Run the Hyperband algorithm twice.
         directory='keras_tuner_dir',
-        project_name=project_name,
+        project_name=project_name, # Updated project name
         overwrite=True
     )
 
     tuner.search_space_summary()
 
     # --- 3. Run Search ---
-    print("Starting KerasTuner search (further reduced scope for even faster run)...")
-    # Reduced patience for early stopping even more for quick check
-    early_stopping_cb = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+    print("Starting KerasTuner Hyperband search...")
+    # Early stopping for each trial within Hyperband
+    # Patience should be appropriate for the number of epochs in each Hyperband round.
+    # Smallest number of epochs could be max_epochs / factor^log_factor(max_epochs) approx.
+    # For max_epochs=81, factor=3 => 81/3^4 = 1.  Smallest epochs = 1.
+    # Next round: 3 epochs, then 9, 27, 81.
+    # Patience of 5-10 might be reasonable for rounds with more epochs.
+    early_stopping_cb = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 
+    # The `epochs` parameter in search() for Hyperband is the number of epochs to train configurations for in the first bracket.
+    # This is a bit confusing. KerasTuner's Hyperband `epochs` in `search` is more like an overall training budget indicator.
+    # The actual epochs per trial are managed by Hyperband's successive halving.
+    # Let's rely on max_epochs in Hyperband constructor and a high number for search epochs.
+    # From KerasTuner docs: "epochs: Number of epochs to train each model.
+    # This parameter is overridden by the `max_epochs` argument of the `Hyperband` Tuner."
+    # So, the `epochs` in `search` might not be strictly necessary here if `max_epochs` is set in Hyperband.
+    # However, it's often provided. Let's set it to `max_epochs`.
     tuner.search(
         X_train_seq, y_train_seq,
-        epochs=10, # Further reduced epochs per trial
+        epochs=81, # Corresponds to max_epochs for Hyperband
         validation_data=(X_val_seq, y_val_seq),
         callbacks=[early_stopping_cb],
-        batch_size=32
+        batch_size=32 # Batch size can also be a hyperparameter if desired
     )
 
     # --- 4. Results ---
