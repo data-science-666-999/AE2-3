@@ -59,60 +59,36 @@ def build_hypermodel(hp):
     raise NotImplementedError("This build_hypermodel(hp) should not be called directly by tuner if using the closure.")
 
 
-def main_tuner(stock_ticker="^AEX", years_of_data=10, project_name="stock_att_lstm_hyperband_10y"):
+def main_tuner(
+    stock_ticker="^AEX",
+    years_of_data=10,
+    project_name_prefix="stock_att_lstm_hyperband",
+    look_back_period=60 # Added look_back_period as a parameter
+):
     """
-    Main function to run KerasTuner with Hyperband.
+    Main function to run KerasTuner with Hyperband for a specific look_back_period.
     """
+    project_name = f"{project_name_prefix}_{look_back_period}d_lookback"
     print(f"Starting hyperparameter tuning for {stock_ticker} using {years_of_data} years of data.")
+    print(f"Using look_back_period = {look_back_period} for data preparation and model input shape.")
 
     # --- 1. Data Preparation ---
-    # We need to decide on how to handle look_back here.
-    # If look_back is tuned by hp.Choice in build_hypermodel, then data splitting and sequence creation
-    # should ideally happen *after* a look_back value is chosen for a trial.
-    # This makes the tuner setup more complex.
-
-    # Simpler approach for first pass: Fix look_back for data generation.
-    # The 'look_back' hp.Choice in build_hypermodel will then primarily inform the Input layer shape.
-    # This assumes the number of features remains constant regardless of look_back choice.
-
-    # Let's fix data generation look_back for now, and tune other params.
-    # The hp.Choice for look_back in build_hypermodel will define the sequence length for that trial.
-    # This means `_create_sequences` needs to be called with the tuned look_back for each trial's data.
-
-    # This is still not ideal as it re-processes data for each trial if look_back is tuned.
-    # For a truly robust look_back tuning, one would typically create datasets for each look_back
-    # and have the tuner select from these datasets or pass look_back to a data generation callback.
-
-    # Let's refine: preprocess data once, then create sequences per trial based on tuned look_back.
     data_preprocessor = DataPreprocessor(stock_ticker=stock_ticker, years_of_data=years_of_data, random_seed=42)
-    processed_df, _ = data_preprocessor.preprocess()
+
+    # We need all outputs from preprocess to correctly use it, although only processed_df is used here.
+    # The other outputs (scaler, selected_features, df_all_indicators) are not directly used by the tuner
+    # but calling the full preprocess() is consistent with how main.py uses it.
+    processed_df, _, _, _ = data_preprocessor.preprocess()
+
 
     if processed_df.empty:
         print("Error: Preprocessed data is empty. Aborting tuning.")
         return
 
-    # The target column is the last one
     target_column_name = processed_df.columns[-1]
 
-    # Data for tuning will be created dynamically if look_back is tuned.
-    # For now, let's assume a fixed look_back for data generation outside the tuner,
-    # and the tuner will adjust model architecture.
-    # We will use a fixed look_back for data splitting here, and the build_hypermodel
-    # will use hp.get('look_back') to set the input_shape.
-
-    # This requires X_train, X_val to be lists of sequences if look_back is tuned by KerasTuner.
-    # For simplicity in this first pass, I will NOT tune look_back with KerasTuner directly in build_hypermodel.
-    # Instead, I will fix look_back for the data preparation, and KerasTuner will tune model architecture params.
-    # The `hp.Choice('look_back', ...)` in build_hypermodel was illustrative and will be removed for now.
-    # The model will get its input_shape based on this fixed look_back.
-
-    fixed_look_back_data_prep = 60 # Example fixed look_back for data preparation.
-                               # This could be iterated upon manually or in a higher-level loop.
-
-    print(f"Using fixed look_back = {fixed_look_back_data_prep} for data preparation during tuning.")
-
     # Create sequences function (adapted from FullStockPredictionModel)
-    def create_sequences_for_tuning(data, look_back, target_col_name):
+    def create_sequences_for_tuning(data, current_look_back, target_col_name):
         target_col_idx = data.columns.get_loc(target_col_name)
         X, y = [], []
         for i in range(len(data) - look_back):
@@ -120,10 +96,11 @@ def main_tuner(stock_ticker="^AEX", years_of_data=10, project_name="stock_att_ls
             y.append(data.iloc[i + look_back, target_col_idx])
         return np.array(X), np.array(y)
 
-    X_seq, y_seq = create_sequences_for_tuning(processed_df, fixed_look_back_data_prep, target_column_name)
+    # Use the passed look_back_period for sequence creation
+    X_seq, y_seq = create_sequences_for_tuning(processed_df, look_back_period, target_column_name)
 
     if len(X_seq) == 0:
-        print("Error: No sequences created. Check data length and look_back period. Aborting tuning.")
+        print(f"Error: No sequences created with look_back = {look_back_period}. Check data length. Aborting tuning for this look_back.")
         return
 
     # Split data: 70% train, 15% validation (for tuner), 15% test (final holdout, not used by tuner)
@@ -149,19 +126,19 @@ def main_tuner(stock_ticker="^AEX", years_of_data=10, project_name="stock_att_ls
     # Update build_hypermodel to remove look_back tuning and use fixed_look_back_data_prep for input_shape
     # This is a workaround for the complexity of tuning look_back directly with KerasTuner's default flow.
     # The ATTLSTMModel's internal look_back is less critical if input_shape is correctly set.
+    # The input_shape for the model will be derived from X_train_seq, which is created using look_back_period.
 
-    # We need to pass the actual input_shape to build_hypermodel, or it needs to derive it.
-    # Let's make build_hypermodel accept input_shape.
-
-    current_input_shape = (X_train_seq.shape[1], X_train_seq.shape[2])
+    current_input_shape = (X_train_seq.shape[1], X_train_seq.shape[2]) # (timesteps, features)
+                                                                    # timesteps here is look_back_period
 
     def build_hypermodel_with_shape(hp):
-        # This inner function captures current_input_shape
+        # This inner function captures current_input_shape and look_back_period
         model_instance = ATTLSTMModel(
-            input_shape=current_input_shape,
-            look_back=fixed_look_back_data_prep # For consistency if model uses it internally
+            input_shape=current_input_shape, # This correctly uses the current look_back_period
+            look_back=look_back_period, # Pass it for consistency, though input_shape is primary driver
+            random_seed=42 # Ensure reproducibility within tuner trials for model initialization
         )
-        # ATTLSTMModel.build_model uses hp to get units, lr, dropout
+        # ATTLSTMModel.build_model uses hp to get units, lr, dropout etc.
         return model_instance.build_model(hp)
 
 
@@ -205,12 +182,18 @@ def main_tuner(stock_ticker="^AEX", years_of_data=10, project_name="stock_att_ls
     # This parameter is overridden by the `max_epochs` argument of the `Hyperband` Tuner."
     # So, the `epochs` in `search` might not be strictly necessary here if `max_epochs` is set in Hyperband.
     # However, it's often provided. Let's set it to `max_epochs`.
+
+    # Note on Tuning Time: To reduce KerasTuner search time for quicker iterations (at the cost of potentially
+    # less optimal hyperparameters), you can:
+    # 1. Reduce `max_epochs` in the Hyperband tuner (e.g., to 40 or 27).
+    # 2. Reduce `hyperband_iterations` (e.g., to 1).
+    # 3. Use a smaller subset of data for tuning if appropriate, though this might generalize poorly.
     tuner.search(
         X_train_seq, y_train_seq,
-        epochs=81, # Corresponds to max_epochs for Hyperband
+        epochs=81, # Corresponds to max_epochs for Hyperband, typically overridden by tuner's max_epochs.
         validation_data=(X_val_seq, y_val_seq),
         callbacks=[early_stopping_cb],
-        batch_size=32 # Batch size can also be a hyperparameter if desired
+        batch_size=32 # Batch size can also be a hyperparameter if desired (defined in ATTLSTMModel.build_model)
     )
 
     # --- 4. Results ---
@@ -232,19 +215,30 @@ def main_tuner(stock_ticker="^AEX", years_of_data=10, project_name="stock_att_ls
     # To get other metrics like MAE, RMSE, you'd predict and calculate manually.
 
 if __name__ == '__main__':
-    # Set random seeds for reproducibility as KerasTuner can also have randomness
+    # Set random seeds for reproducibility
     np.random.seed(42)
     tf.random.set_seed(42)
-    # Add any other library-specific random seed settings if necessary
 
-    main_tuner()
-    print("KerasTuner script finished.")
+    # Example of how one might loop through different look_back periods:
+    # This part would typically be in a separate script that calls main_tuner.
+    # For demonstration, it's included here.
+    look_back_values_to_test = [30, 60, 90] # Example values
+
+    for lb_period in look_back_values_to_test:
+        print(f"\n--- Running Tuner for Look-Back Period: {lb_period} ---")
+        main_tuner(
+            stock_ticker="^AEX", # Or pass as args
+            years_of_data=10,    # Or pass as args
+            project_name_prefix="stock_att_lstm_tuning_lb_opt", # Unique prefix for this optimization effort
+            look_back_period=lb_period
+        )
+        print(f"--- Tuner Run for Look-Back Period: {lb_period} Finished ---")
+
+    print("\nKerasTuner script for look_back optimization finished.")
 
 # Note on look_back tuning:
-# If 'look_back' were to be tuned by KerasTuner (e.g., hp.Choice in build_hypermodel),
-# the data (X_train_seq, y_train_seq, X_val_seq, y_val_seq) would need to be regenerated
-# for each trial *before* model.fit is called by the tuner. This typically requires
-# subclassing keras_tuner.Tuner and overriding `run_trial`, or using a custom training loop.
-# The current setup fixes look_back for data generation and tunes model architecture parameters.
+# The current setup runs the entire KerasTuner search for each look_back period.
+# After these runs, one would compare the best model performance (e.g., test loss from tuner.evaluate)
+# and potentially training times from each tuner run (project_name directory) to select an optimal look_back.
 # The `fixed_look_back` in ATTLSTMModel constructor is mostly for its internal sequence creation
-# method, which isn't used when data is prepared externally. The `input_shape` passed to it is key.
+# method (if used), but input_shape (derived from look_back_period here) is the primary driver for the model layers.
