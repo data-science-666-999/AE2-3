@@ -10,7 +10,7 @@ import ta
 # --- Module 1: Data Acquisition and Preprocessing ---
 
 class DataPreprocessor:
-    def __init__(self, stock_ticker='AEL', years_of_data=5, random_seed=42):
+    def __init__(self, stock_ticker='AEL', years_of_data=10, random_seed=42): # Default to 10 years
         self.stock_ticker = stock_ticker
         self.years_of_data = years_of_data
         self.random_seed = random_seed

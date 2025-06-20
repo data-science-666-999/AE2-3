@@ -22,20 +22,35 @@ class ATTLSTMModel:
         self.random_seed = random_seed
         tf.random.set_seed(self.random_seed)
         np.random.seed(self.random_seed)
+        # self.hp = None # hp object will be passed to build_model
 
     def _create_sequences(self, data, target_column_index):
+        # This method might be better placed in DataPreprocessor or main script
+        # if look_back is tuned, as ATTLSTMModel instance might not know the tuned look_back
+        # For now, assuming look_back is fixed for a given ATTLSTMModel instance.
         X, y = [], []
         for i in range(len(data) - self.look_back):
             X.append(data[i:(i + self.look_back), :])
             y.append(data[i + self.look_back, target_column_index])
         return np.array(X), np.array(y)
 
-    def build_model(self):
+    def build_model(self, hp=None): # Accept hp object
+        if hp: # Use hyperparameters from tuner if provided
+            lstm_units = hp.Int('lstm_units', min_value=32, max_value=256, step=32)
+            dense_units = hp.Int('dense_units', min_value=16, max_value=128, step=16)
+            learning_rate = hp.Float('learning_rate', min_value=1e-4, max_value=1e-2, sampling='log')
+            dropout_rate = hp.Float('dropout_rate', min_value=0.1, max_value=0.5, step=0.1)
+        else: # Use instance attributes if hp not provided (for direct instantiation and training)
+            lstm_units = self.lstm_units
+            dense_units = self.dense_units
+            learning_rate = self.learning_rate
+            dropout_rate = 0.2 # Default if not tuning
+
         inputs = Input(shape=self.input_shape)
 
         # LSTM layer to process sequences
         # return_sequences=True is crucial for attention mechanism to attend over the sequence
-        lstm_out = LSTM(self.lstm_units, return_sequences=True)(inputs)
+        lstm_out = LSTM(lstm_units, return_sequences=True)(inputs)
 
         # --- Attention Mechanism (using keras.ops for compatibility with KerasTensors) ---
         # Query: last hidden state of LSTM
@@ -71,16 +86,31 @@ class ATTLSTMModel:
         merged_output = Concatenate()([query, context_vector])
 
         # Dense layers for prediction
-        x = Dense(self.dense_units, activation="relu")(merged_output)
-        x = Dropout(0.2)(x) # Added Dropout for regularization
+        # Use dense_units from hp or self, and dropout_rate from hp or default
+        x = Dense(dense_units, activation="relu")(merged_output)
+        x = Dropout(dropout_rate)(x) # Use tuned dropout rate or default
         outputs = Dense(1)(x) # Output a single value for stock price prediction
 
-        self.model = Model(inputs=inputs, outputs=outputs)
-        self.model.compile(optimizer=Adam(learning_rate=self.learning_rate), loss="mse")
+        # Create the model object
+        model = Model(inputs=inputs, outputs=outputs)
+
+        # Compile the model with the potentially tuned learning rate
+        model.compile(optimizer=Adam(learning_rate=learning_rate), loss="mse")
+
+        # If build_model is called directly (not by KerasTuner),
+        # it should still assign the created model to self.model
+        if not hp:
+            self.model = model
+
+        return model # Crucial: return the compiled model for KerasTuner
 
     def train(self, X_train, y_train, X_val, y_val, epochs=100, batch_size=32, early_stopping_patience=10, reduce_lr_patience=5, reduce_lr_factor=0.2):
+        # If self.model is not set (e.g. if only build_model(hp) was called by tuner),
+        # this method might not work as expected unless it receives a model or self.model is set by caller after tuning.
+        # For direct training of an ATTLSTMModel instance, ensure build_model() (no hp) is called if model is None.
         if self.model is None:
-            self.build_model()
+            print("Warning: self.model is None in train(). Calling build_model() without hp to initialize.")
+            self.build_model() # This will use instance attributes and assign to self.model
 
         # Callbacks
         early_stopping = EarlyStopping(

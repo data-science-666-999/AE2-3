@@ -100,62 +100,50 @@ class FullStockPredictionModel:
         self.att_lstm_model.build_model()
         self.att_lstm_model.train(X_train_seq, y_train_seq, X_val_seq, y_val_seq, epochs=epochs, batch_size=batch_size)
 
-        # Predict on validation and test sets for LSTM
-        att_lstm_val_preds = self.att_lstm_model.predict(X_val_seq).flatten()
+        # Predict on test set for LSTM
         att_lstm_test_preds = self.att_lstm_model.predict(X_test_seq).flatten()
 
-        # 3. Train Cyclic Multidimensional Gray Model (NSGM(1,N)) Module
-        # NSGM(1,N) trains on the full (non-sequential) data up to the training split point.
-        # The primary series for NSGM is 'Close', and related series are other features.
-        nsgm_train_data_end_idx = len(self.processed_df) - len(y_seq) + len(y_train_seq) # Index in processed_df corresponding to end of y_train_seq
-        nsgm_train_df = self.processed_df.iloc[:nsgm_train_data_end_idx]
-        
-        nsgm_X_train = nsgm_train_df.drop(columns=[target_column_name]).values
-        nsgm_y_train = nsgm_train_df[target_column_name].values
-
-        self.nsgm_model.train(nsgm_X_train, nsgm_y_train)
-
-        # Predict on validation and test sets for NSGM
-        # NSGM predicts one step at a time, requiring the previous 'look_back' actual values.
-        # We need to reconstruct the sequences for NSGM prediction from the original processed_df.
-        nsgm_val_preds = []
-        for i in range(len(X_val_seq)):
-            # Get the actual data points corresponding to the current validation sequence
-            # The sequence starts at processed_df.index[len(y_train_seq) + i]
-            # and goes back for 'look_back' steps.
-            start_idx_in_processed_df = len(self.processed_df) - len(y_seq) + len(y_train_seq) + i - self.look_back
-            end_idx_in_processed_df = start_idx_in_processed_df + self.look_back
-            current_nsgm_sequence = self.processed_df.iloc[start_idx_in_processed_df:end_idx_in_processed_df].values
-            nsgm_val_preds.append(self.nsgm_model.predict(current_nsgm_sequence))
-        nsgm_val_preds = np.array(nsgm_val_preds).flatten()
-
-        nsgm_test_preds = []
-        for i in range(len(X_test_seq)):
-            start_idx_in_processed_df = len(self.processed_df) - len(y_seq) + len(y_train_seq) + len(y_val_seq) + i - self.look_back
-            end_idx_in_processed_df = start_idx_in_processed_df + self.look_back
-            current_nsgm_sequence = self.processed_df.iloc[start_idx_in_processed_df:end_idx_in_processed_df].values
-            nsgm_test_preds.append(self.nsgm_model.predict(current_nsgm_sequence))
-        nsgm_test_preds = np.array(nsgm_test_preds).flatten()
-
-        # 4. Train Ensemble (Weighted Fusion) Module
-        self.ensemble_model.train_weights(att_lstm_val_preds, nsgm_val_preds, y_val_seq)
-
-        # 5. Make Final Ensemble Predictions on Test Set
-        ensemble_test_preds = self.ensemble_model.predict(att_lstm_test_preds, nsgm_test_preds)
+        # --- NSGM and Ensemble sections are temporarily bypassed for ATT-LSTM focus ---
+        # # 3. Train Cyclic Multidimensional Gray Model (NSGM(1,N)) Module
+        # nsgm_train_data_end_idx = len(self.processed_df) - len(y_seq) + len(y_train_seq)
+        # nsgm_train_df = self.processed_df.iloc[:nsgm_train_data_end_idx]
+        # nsgm_X_train = nsgm_train_df.drop(columns=[target_column_name]).values
+        # nsgm_y_train = nsgm_train_df[target_column_name].values
+        # self.nsgm_model.train(nsgm_X_train, nsgm_y_train)
+        #
+        # # Predict on validation and test sets for NSGM
+        # att_lstm_val_preds = self.att_lstm_model.predict(X_val_seq).flatten() # Needed for ensemble training
+        # nsgm_val_preds = []
+        # for i in range(len(X_val_seq)):
+        #     start_idx_in_processed_df = len(self.processed_df) - len(y_seq) + len(y_train_seq) + i - self.look_back
+        #     end_idx_in_processed_df = start_idx_in_processed_df + self.look_back
+        #     current_nsgm_sequence = self.processed_df.iloc[start_idx_in_processed_df:end_idx_in_processed_df].values
+        #     nsgm_val_preds.append(self.nsgm_model.predict(current_nsgm_sequence))
+        # nsgm_val_preds = np.array(nsgm_val_preds).flatten()
+        #
+        # nsgm_test_preds = []
+        # for i in range(len(X_test_seq)):
+        #     start_idx_in_processed_df = len(self.processed_df) - len(y_seq) + len(y_train_seq) + len(y_val_seq) + i - self.look_back
+        #     end_idx_in_processed_df = start_idx_in_processed_df + self.look_back
+        #     current_nsgm_sequence = self.processed_df.iloc[start_idx_in_processed_df:end_idx_in_processed_df].values
+        #     nsgm_test_preds.append(self.nsgm_model.predict(current_nsgm_sequence))
+        # nsgm_test_preds = np.array(nsgm_test_preds).flatten()
+        #
+        # # 4. Train Ensemble (Weighted Fusion) Module
+        # self.ensemble_model.train_weights(att_lstm_val_preds, nsgm_val_preds, y_val_seq)
+        #
+        # # 5. Make Final Ensemble Predictions on Test Set
+        # ensemble_test_preds = self.ensemble_model.predict(att_lstm_test_preds, nsgm_test_preds)
+        # --- End of bypassed NSGM and Ensemble sections ---
 
         # Inverse transform predictions and actual values to original scale
-        # Create dummy arrays for inverse transform, placing predictions/actuals in the 'Close' column
         dummy_preds_lstm = np.zeros((len(att_lstm_test_preds), self.processed_df.shape[1]))
         dummy_preds_lstm[:, self.processed_df.columns.get_loc(target_column_name)] = att_lstm_test_preds
         original_att_lstm_test_preds = self.data_scaler.inverse_transform(dummy_preds_lstm)[:, self.processed_df.columns.get_loc(target_column_name)]
 
-        dummy_preds_nsgm = np.zeros((len(nsgm_test_preds), self.processed_df.shape[1]))
-        dummy_preds_nsgm[:, self.processed_df.columns.get_loc(target_column_name)] = nsgm_test_preds
-        original_nsgm_test_preds = self.data_scaler.inverse_transform(dummy_preds_nsgm)[:, self.processed_df.columns.get_loc(target_column_name)]
-
-        dummy_preds_ensemble = np.zeros((len(ensemble_test_preds), self.processed_df.shape[1]))
-        dummy_preds_ensemble[:, self.processed_df.columns.get_loc(target_column_name)] = ensemble_test_preds
-        original_ensemble_test_preds = self.data_scaler.inverse_transform(dummy_preds_ensemble)[:, self.processed_df.columns.get_loc(target_column_name)]
+        # Placeholder for NSGM and Ensemble if they were active
+        original_nsgm_test_preds = np.full_like(original_att_lstm_test_preds, np.nan)
+        original_ensemble_test_preds = original_att_lstm_test_preds # Default to LSTM if ensemble is off
 
         dummy_actuals = np.zeros((len(y_test_seq), self.processed_df.shape[1]))
         dummy_actuals[:, self.processed_df.columns.get_loc(target_column_name)] = y_test_seq
@@ -169,15 +157,18 @@ class FullStockPredictionModel:
         rmse_lstm = np.sqrt(mse_lstm)
         print(f"ATT-LSTM - MSE: {mse_lstm:.4f}, MAE: {mae_lstm:.4f}, RMSE: {rmse_lstm:.4f}")
 
-        mse_nsgm = mean_squared_error(original_y_test_seq, original_nsgm_test_preds)
-        mae_nsgm = mean_absolute_error(original_y_test_seq, original_nsgm_test_preds)
-        rmse_nsgm = np.sqrt(mse_nsgm)
-        print(f"NSGM(1,N) - MSE: {mse_nsgm:.4f}, MAE: {mae_nsgm:.4f}, RMSE: {rmse_nsgm:.4f}")
+        # Bypassed NSGM and Ensemble metrics
+        # mse_nsgm = mean_squared_error(original_y_test_seq, original_nsgm_test_preds)
+        # mae_nsgm = mean_absolute_error(original_y_test_seq, original_nsgm_test_preds)
+        # rmse_nsgm = np.sqrt(mse_nsgm)
+        # print(f"NSGM(1,N) - MSE: {mse_nsgm:.4f}, MAE: {mae_nsgm:.4f}, RMSE: {rmse_nsgm:.4f}")
+        #
+        # mse_ensemble = mean_squared_error(original_y_test_seq, original_ensemble_test_preds)
+        # mae_ensemble = mean_absolute_error(original_y_test_seq, original_ensemble_test_preds)
+        # rmse_ensemble = np.sqrt(mse_ensemble)
+        # print(f"Ensemble Model - MSE: {mse_ensemble:.4f}, MAE: {mae_ensemble:.4f}, RMSE: {rmse_ensemble:.4f}")
+        print("NSGM and Ensemble models are currently bypassed for ATT-LSTM focus.")
 
-        mse_ensemble = mean_squared_error(original_y_test_seq, original_ensemble_test_preds)
-        mae_ensemble = mean_absolute_error(original_y_test_seq, original_ensemble_test_preds)
-        rmse_ensemble = np.sqrt(mse_ensemble)
-        print(f"Ensemble Model - MSE: {mse_ensemble:.4f}, MAE: {mae_ensemble:.4f}, RMSE: {rmse_ensemble:.4f}")
 
         # Create a directory for plots if it doesn't exist
         plots_dir = "prediction_plots"
@@ -185,63 +176,46 @@ class FullStockPredictionModel:
         print(f"Ensured '{plots_dir}' directory exists at: {os.path.abspath(plots_dir)}")
 
 
-        # Generate and save plots
-        test_indices = self.processed_df.index[-len(original_y_test_seq):] # Get appropriate datetime index for plots
+        # Generate and save plots (primarily for ATT-LSTM now)
+        test_indices = self.processed_df.index[-len(original_y_test_seq):]
 
-        try:
+        try: # Simplified plotting section
             self._plot_predictions_vs_actuals_timeseries(
-                test_indices, original_y_test_seq, original_ensemble_test_preds,
-                "Ensemble Model Predictions vs Actuals",
-                os.path.join(plots_dir, "ensemble_preds_vs_actuals_timeseries.png")
+                test_indices, original_y_test_seq, original_att_lstm_test_preds,
+                "ATT-LSTM Model Predictions vs Actuals",
+                os.path.join(plots_dir, "att_lstm_preds_vs_actuals_timeseries.png")
+            )
+            self._plot_predictions_vs_actuals_scatter(
+                original_y_test_seq, original_att_lstm_test_preds,
+                "ATT-LSTM Model Predictions vs Actuals",
+                os.path.join(plots_dir, "att_lstm_preds_vs_actuals_scatter.png")
+            )
+            residuals_lstm = original_y_test_seq - original_att_lstm_test_preds
+            self._plot_residuals_timeseries(
+                test_indices, residuals_lstm,
+                "ATT-LSTM Model Residuals Over Time",
+                os.path.join(plots_dir, "att_lstm_residuals_timeseries.png")
+            )
+            self._plot_residuals_histogram(
+                residuals_lstm,
+                "ATT-LSTM Model Distribution of Residuals",
+                os.path.join(plots_dir, "att_lstm_residuals_histogram.png")
             )
         except Exception as e:
-            print(f"Error saving ensemble_preds_vs_actuals_timeseries.png: {e}")
+            print(f"Error during plotting: {e}")
 
-        self._plot_predictions_vs_actuals_timeseries(
-            test_indices, original_y_test_seq, original_ensemble_test_preds,
-            "Ensemble Model Predictions vs Actuals",
-            os.path.join(plots_dir, "ensemble_preds_vs_actuals_timeseries.png")
-        )
-        self._plot_predictions_vs_actuals_timeseries(
-            test_indices, original_y_test_seq, original_att_lstm_test_preds,
-            "ATT-LSTM Model Predictions vs Actuals",
-            os.path.join(plots_dir, "att_lstm_preds_vs_actuals_timeseries.png")
-        )
-        self._plot_predictions_vs_actuals_timeseries(
-            test_indices, original_y_test_seq, original_nsgm_test_preds,
-            "NSGM(1,N) Model Predictions vs Actuals",
-            os.path.join(plots_dir, "nsgm_preds_vs_actuals_timeseries.png")
-        )
-        self._plot_predictions_vs_actuals_scatter(
-            original_y_test_seq, original_ensemble_test_preds,
-            "Ensemble Model Predictions vs Actuals",
-            os.path.join(plots_dir, "ensemble_preds_vs_actuals_scatter.png")
-        )
-
-        residuals_ensemble = original_y_test_seq - original_ensemble_test_preds
-        self._plot_residuals_timeseries(
-            test_indices, residuals_ensemble,
-            "Ensemble Model Residuals Over Time",
-            os.path.join(plots_dir, "ensemble_residuals_timeseries.png")
-        )
-        self._plot_residuals_histogram(
-            residuals_ensemble,
-            "Ensemble Model Distribution of Residuals",
-            os.path.join(plots_dir, "ensemble_residuals_histogram.png")
-        )
         print(f"\nVisualizations saved to '{plots_dir}' directory.")
-
-        print("\n--- Full Model Training and Evaluation Complete ---")
+        print("\n--- ATT-LSTM Focused Training and Evaluation Complete ---")
 
         return {
             "att_lstm_preds": original_att_lstm_test_preds,
-            "nsgm_preds": original_nsgm_test_preds,
-            "ensemble_preds": original_ensemble_test_preds,
+            # "nsgm_preds": original_nsgm_test_preds, # Bypassed
+            # "ensemble_preds": original_ensemble_test_preds, # Bypassed
             "actual_values": original_y_test_seq,
             "metrics": {
                 "lstm_mse": mse_lstm, "lstm_mae": mae_lstm, "lstm_rmse": rmse_lstm,
-                "nsgm_mse": mse_nsgm, "nsgm_mae": mae_nsgm, "nsgm_rmse": rmse_nsgm,
-                "ensemble_mse": mse_ensemble, "ensemble_mae": mae_ensemble, "ensemble_rmse": rmse_ensemble
+                # "nsgm_mse": mse_nsgm, "nsgm_mae": mae_nsgm, "nsgm_rmse": rmse_nsgm, # Bypassed
+                # "ensemble_mse": mse_ensemble, "ensemble_mae": mae_ensemble, "ensemble_rmse": rmse_ensemble # Bypassed
             }
         }
 
