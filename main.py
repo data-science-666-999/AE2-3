@@ -103,7 +103,10 @@ class FullStockPredictionModel:
         for key, value in hypothetical_best_hps.items():
             print(f"  {key}: {value}")
         print("------------------------------------------------------------")
-
+        print(f"--- Final Training Parameters for ATT-LSTM ---")
+        print(f"  Epochs: {epochs}")
+        print(f"  Batch Size: {batch_size}")
+        print("------------------------------------------------------------")
 
         input_shape_lstm = (X_train_seq.shape[1], X_train_seq.shape[2]) # (timesteps, features)
 
@@ -282,10 +285,15 @@ if __name__ == '__main__':
     # Train with more epochs, relying on EarlyStopping in ATTLSTMModel
     # Epochs and batch_size for the final training run after HPO.
     # These could also be part of the tuned HPs.
+    print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
+    overall_start_time = time.time()
     results = full_model.train_and_evaluate(
         epochs=150, # Increased epochs for final training
         batch_size=32
     )
+    overall_end_time = time.time()
+    overall_duration = overall_end_time - overall_start_time
+    print(f"--- Full Model Training and Evaluation Took: {overall_duration:.2f} seconds ---")
 
     if results: # Check if results were returned (not empty on error)
         print("\n--- Final Results ---")
@@ -328,14 +336,21 @@ if __name__ == '__main__':
                 # For single instance prediction, the input needs to be (1, look_back, num_features)
                 single_instance_input = np.expand_dims(sample_raw_data, axis=0)
 
+                # Warm-up call for single instance prediction
+                print("Performing warm-up prediction for single instance...")
+                _ = full_model.att_lstm_model.predict(single_instance_input)
+
                 # Time single instance prediction
                 num_single_runs = 10
                 single_pred_times = []
-                for _ in range(num_single_runs):
+                print(f"Timing single instance prediction over {num_single_runs} runs...")
+                for i in range(num_single_runs):
                     start_time = time.time()
                     _ = full_model.att_lstm_model.predict(single_instance_input)
                     end_time = time.time()
                     single_pred_times.append(end_time - start_time)
+                    # print(f"Run {i+1}/{num_single_runs}, time: {(end_time - start_time)*1000:.2f} ms")
+
 
                 avg_single_pred_time = np.mean(single_pred_times)
                 print(f"Average single instance prediction time: {avg_single_pred_time*1000:.2f} ms (over {num_single_runs} runs)")
@@ -345,13 +360,19 @@ if __name__ == '__main__':
                 # Create a batch of dummy data: (batch_size_test, look_back, num_features)
                 batch_input = np.random.rand(batch_size_test, full_model.look_back, num_features)
 
-                num_batch_runs = 5
+                # Warm-up call for batch prediction
+                print(f"Performing warm-up prediction for batch (size {batch_size_test})...")
+                _ = full_model.att_lstm_model.predict(batch_input)
+
+                num_batch_runs = 10 # Increased from 5
                 batch_pred_times = []
-                for _ in range(num_batch_runs):
+                print(f"Timing batch prediction (size {batch_size_test}) over {num_batch_runs} runs...")
+                for i in range(num_batch_runs):
                     start_time = time.time()
                     _ = full_model.att_lstm_model.predict(batch_input)
                     end_time = time.time()
                     batch_pred_times.append(end_time - start_time)
+                    # print(f"Run {i+1}/{num_batch_runs}, time: {(end_time - start_time)*1000:.2f} ms")
 
                 avg_batch_pred_time_total = np.mean(batch_pred_times)
                 avg_batch_pred_time_per_instance = avg_batch_pred_time_total / batch_size_test
