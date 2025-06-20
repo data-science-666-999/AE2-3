@@ -2,8 +2,9 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, LSTM, Dense, Concatenate
+from tensorflow.keras.layers import Input, LSTM, Dense, Concatenate, Dropout
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 import keras
@@ -71,21 +72,38 @@ class ATTLSTMModel:
 
         # Dense layers for prediction
         x = Dense(self.dense_units, activation="relu")(merged_output)
+        x = Dropout(0.2)(x) # Added Dropout for regularization
         outputs = Dense(1)(x) # Output a single value for stock price prediction
 
         self.model = Model(inputs=inputs, outputs=outputs)
         self.model.compile(optimizer=Adam(learning_rate=self.learning_rate), loss="mse")
 
-    def train(self, X_train, y_train, X_val, y_val, epochs=50, batch_size=32):
+    def train(self, X_train, y_train, X_val, y_val, epochs=100, batch_size=32, early_stopping_patience=10, reduce_lr_patience=5, reduce_lr_factor=0.2):
         if self.model is None:
             self.build_model()
 
-        print("Training ATT-LSTM model...")
+        # Callbacks
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=early_stopping_patience,
+            verbose=1,
+            restore_best_weights=True # Restores model weights from the epoch with the best value of the monitored quantity.
+        )
+        reduce_lr = ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=reduce_lr_factor,
+            patience=reduce_lr_patience,
+            verbose=1,
+            min_lr=1e-6 # Do not reduce LR below this value
+        )
+
+        print("Training ATT-LSTM model with Early Stopping and ReduceLROnPlateau...")
         history = self.model.fit(
             X_train, y_train,
             epochs=epochs,
             batch_size=batch_size,
             validation_data=(X_val, y_val),
+            callbacks=[early_stopping, reduce_lr],
             verbose=1,
             shuffle=False # Important for time series data
         )
