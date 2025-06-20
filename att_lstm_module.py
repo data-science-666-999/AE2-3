@@ -8,6 +8,12 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 import keras
+import matplotlib.pyplot as plt
+import os
+
+# Import DataPreprocessor from the sibling module
+from data_preprocessing_module import DataPreprocessor
+
 
 # --- Module 2: Attention-Enhanced LSTM (ATT-LSTM) Module ---
 
@@ -147,47 +153,129 @@ class ATTLSTMModel:
 
 # Example Usage (for testing the module)
 if __name__ == '__main__':
-    # Simulate some preprocessed data (replace with actual preprocessed_df from Module 1)
-    # For demonstration, let's assume preprocessed_df has 6 features (including 'Close')
-    # and a shape like (n_samples, n_features)
-    n_samples = 1000
-    n_features = 6 # e.g., High, Low, SMA_30, EMA_10, RSI, Close
-    # Simulate scaled data between 0 and 1
-    simulated_data = np.random.rand(n_samples, n_features)
-    simulated_df = pd.DataFrame(simulated_data, columns=[f'feature_{i}' for i in range(n_features-1)] + ['Close'])
+    print("\n--- ATTLSTMModel Module Test ---")
+    # 1. Get preprocessed data
+    # Using AAPL for 2 years to get a bit more data for LSTM training than 1 year.
+    # look_back is 60, so we need at least 60+ data points for one sequence.
+    # train/val/test split will further reduce this.
+    # (0.8 * 0.75) * (N - 60) for X_train. If N=250 (1 year), (250-60)*0.6 = 114 samples for training.
+    # If N=500 (2 years), (500-60)*0.6 = 264 samples for training. This is better.
+    data_preprocessor = DataPreprocessor(stock_ticker='AAPL', years_of_data=2, random_seed=42)
+    processed_df, data_scaler = data_preprocessor.preprocess()
 
-    # Assuming 'Close' is the target column and is the last column (index n_features-1)
-    target_column_index = simulated_df.columns.get_loc('Close')
+    if processed_df is None or processed_df.empty:
+        print("Failed to preprocess data. Aborting ATTLSTMModel test.")
+    else:
+        print(f"Shape of preprocessed_df: {processed_df.shape}")
+        # Assuming target column is the last one, as per DataPreprocessor output
+        target_column_name = processed_df.columns[-1]
+        target_column_index = processed_df.columns.get_loc(target_column_name)
+        print(f"Target column for LSTM: {target_column_name} at index {target_column_index}")
 
-    look_back = 60
-    # Create sequences
-    X, y = [], []
-    for i in range(len(simulated_df) - look_back):
-        X.append(simulated_df.iloc[i:(i + look_back), :].values)
-        y.append(simulated_df.iloc[i + look_back, target_column_index])
-    X = np.array(X)
-    y = np.array(y)
+        look_back = 60 # Standard look_back
 
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
-    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, random_state=42, shuffle=False) # 0.25 of 0.8 is 0.2
+        # Create sequences (using the model's own _create_sequences if it's suitable, or a local one)
+        # The model's _create_sequences is simple, let's use a local version for clarity here.
+        def create_sequences_for_test(data_df, target_idx, lb):
+            X_data, y_data = [], []
+            raw_data = data_df.values # Convert to numpy array for faster iloc-like access
+            for i in range(len(raw_data) - lb):
+                X_data.append(raw_data[i:(i + lb), :]) # All features
+                y_data.append(raw_data[i + lb, target_idx]) # Target feature
+            return np.array(X_data), np.array(y_data)
 
-    print(f"X_train shape: {X_train.shape}")
-    print(f"y_train shape: {y_train.shape}")
-    print(f"X_val shape: {X_val.shape}")
-    print(f"y_val shape: {y_val.shape}")
-    print(f"X_test shape: {X_test.shape}")
-    print(f"y_test shape: {y_test.shape}")
+        X, y = create_sequences_for_test(processed_df, target_column_index, look_back)
 
-    input_shape = (X_train.shape[1], X_train.shape[2]) # (timesteps, features)
-    att_lstm = ATTLSTMModel(input_shape=input_shape, look_back=look_back)
-    att_lstm.build_model()
-    att_lstm.model.summary()
+        if X.shape[0] == 0:
+            print("Not enough data to create sequences. Aborting.")
+        else:
+            # Split data: 80% train, 20% temp -> then 20% of temp becomes 25% of train for val
+            # Temporal split is important: shuffle=False
+            X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
+            X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, shuffle=False) # Split temp into 50% val, 50% test
 
-    history = att_lstm.train(X_train, y_train, X_val, y_val, epochs=5, batch_size=32)
+            print(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
+            print(f"X_val shape: {X_val.shape}, y_val shape: {y_val.shape}")
+            print(f"X_test shape: {X_test.shape}, y_test shape: {y_test.shape}")
 
-    predictions = att_lstm.predict(X_test)
-    print("\nSample predictions:", predictions[:5].flatten())
-    print("Sample true values:", y_test[:5])
+            if X_train.shape[0] == 0 or X_val.shape[0] == 0 or X_test.shape[0] == 0:
+                print("Not enough data after splitting for training/validation/testing. Aborting.")
+            else:
+                input_shape = (X_train.shape[1], X_train.shape[2]) # (timesteps, features)
+
+                # Initialize and build model
+                # Using default units from the class for this test
+                att_lstm_test_model = ATTLSTMModel(
+                    input_shape=input_shape,
+                    lstm_units=50, # Smaller units for faster test
+                    dense_units=25,
+                    look_back=look_back,
+                    random_seed=42
+                )
+                att_lstm_test_model.build_model() # Build with default params
+                print("\nATTLSTM Model Summary (for test):")
+                att_lstm_test_model.model.summary()
+
+                # Train model
+                print("\nTraining ATTLSTM model for test...")
+                # Train for fewer epochs for a module test, relying on EarlyStopping
+                history = att_lstm_test_model.train(
+                    X_train, y_train, X_val, y_val,
+                    epochs=10, # Reduced epochs for test
+                    batch_size=16, # Smaller batch size for smaller dataset
+                    early_stopping_patience=3,
+                    reduce_lr_patience=2
+                )
+
+                # Evaluate model
+                print("\nEvaluating ATTLSTM model on test set...")
+                predictions_scaled = att_lstm_test_model.predict(X_test).flatten()
+
+                # Since y_test is already scaled (it came from processed_df),
+                # we can calculate metrics directly on scaled data for this module test.
+                from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+                mse_scaled = mean_squared_error(y_test, predictions_scaled)
+                mae_scaled = mean_absolute_error(y_test, predictions_scaled)
+                rmse_scaled = np.sqrt(mse_scaled)
+
+                print("\n--- ATTLSTM Model Performance (Scaled Data) ---")
+                print(f"Test MSE (scaled): {mse_scaled:.6f}")
+                print(f"Test MAE (scaled): {mae_scaled:.6f}")
+                print(f"Test RMSE (scaled): {rmse_scaled:.6f}")
+
+                # Visualizations
+                print("\nGenerating visualizations for ATTLSTM module test...")
+
+                # 1. Plot training & validation loss
+                plt.figure(figsize=(10, 6))
+                plt.plot(history.history['loss'], label='Training Loss')
+                plt.plot(history.history['val_loss'], label='Validation Loss')
+                plt.title('ATTLSTM Model Training and Validation Loss (Module Test)')
+                plt.xlabel('Epoch')
+                plt.ylabel('Loss (MSE)')
+                plt.legend()
+                plt.grid(True)
+                loss_plot_filename = "att_lstm_module_loss_curve.png"
+                plt.savefig(loss_plot_filename)
+                print(f"Loss curve plot saved as {loss_plot_filename} in {os.path.abspath('.')}")
+                plt.close()
+
+                # 2. Plot predictions vs. actuals for a sample from the test set
+                sample_size = min(50, len(y_test)) # Plot up to 50 points
+                plt.figure(figsize=(12, 6))
+                plt.plot(y_test[:sample_size], label='Actual Values (Scaled)', marker='.')
+                plt.plot(predictions_scaled[:sample_size], label='Predicted Values (Scaled)', linestyle='--')
+                plt.title(f'ATTLSTM Predictions vs Actuals (First {sample_size} Test Samples - Scaled)')
+                plt.xlabel('Sample Index')
+                plt.ylabel('Value (Scaled)')
+                plt.legend()
+                plt.grid(True)
+                preds_plot_filename = "att_lstm_module_preds_vs_actuals.png"
+                plt.savefig(preds_plot_filename)
+                print(f"Predictions vs actuals plot saved as {preds_plot_filename} in {os.path.abspath('.')}")
+                plt.close()
+
+    print("\n--- End of ATTLSTMModel Module Test ---")
 
 

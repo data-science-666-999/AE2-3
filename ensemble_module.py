@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error
 from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+import os
 
 # --- Module 4: Ensemble (Weighted Fusion) Module ---
 
@@ -76,33 +78,60 @@ class EnsembleModel:
 
 # Example Usage (for testing the module)
 if __name__ == '__main__':
+    print("\n--- EnsembleModel Module Test ---")
     # Simulate validation predictions from ATT-LSTM and NSGM
     n_val_samples = 100
-    np.random.seed(42)
-    att_lstm_val_preds = np.random.rand(n_val_samples) * 100 # Scaled predictions
-    nsgm_val_preds = np.random.rand(n_val_samples) * 100 # Scaled predictions
-    actual_val_targets = np.random.rand(n_val_samples) * 100 # Scaled actual values
+    np.random.seed(42) # Ensure reproducibility for simulated data
+    att_lstm_val_preds = np.random.rand(n_val_samples) * 100
+    nsgm_val_preds = np.random.rand(n_val_samples) * 90 # Slightly different scale for NSGM
+    actual_val_targets = (0.6 * att_lstm_val_preds + 0.4 * nsgm_val_preds) + np.random.normal(0, 5, n_val_samples) # Actuals related to inputs + noise
 
-    # Initialize and train the ensemble model
-    ensemble_model = EnsembleModel(optimization_method='mse_optimization')
-    ensemble_model.train_weights(att_lstm_val_preds, nsgm_val_preds, actual_val_targets)
+    # --- Test with 'mse_optimization' ---
+    print("\n1. Testing with 'mse_optimization':")
+    ensemble_model_optimized = EnsembleModel(optimization_method='mse_optimization', random_seed=42)
+    ensemble_model_optimized.train_weights(att_lstm_val_preds, nsgm_val_preds, actual_val_targets)
+
+    print(f"   Optimized Weights (ATT-LSTM, NSGM): {ensemble_model_optimized.weights}")
+
+    # Visualize optimized weights
+    if ensemble_model_optimized.weights is not None:
+        plt.figure(figsize=(6, 4))
+        model_names = ['ATT-LSTM', 'NSGM']
+        plt.bar(model_names, ensemble_model_optimized.weights, color=['skyblue', 'lightgreen'])
+        plt.ylabel("Weight Value")
+        plt.title("Optimized Ensemble Weights (mse_optimization)")
+        plt.ylim(0, 1)
+        for i, weight in enumerate(ensemble_model_optimized.weights):
+            plt.text(i, weight + 0.02, f"{weight:.3f}", ha='center')
+
+        plot_filename = "ensemble_module_optimized_weights.png"
+        plt.savefig(plot_filename)
+        print(f"   Optimized weights plot saved as {plot_filename} in {os.path.abspath('.')}")
+        plt.close()
 
     # Simulate test predictions from ATT-LSTM and NSGM
     n_test_samples = 50
     att_lstm_test_preds = np.random.rand(n_test_samples) * 100
-    nsgm_test_preds = np.random.rand(n_test_samples) * 100
+    nsgm_test_preds = np.random.rand(n_test_samples) * 90
 
-    # Make combined predictions
-    combined_predictions = ensemble_model.predict(att_lstm_test_preds, nsgm_test_preds)
+    # Make combined predictions with optimized model
+    if ensemble_model_optimized.weights is not None:
+        combined_predictions_optimized = ensemble_model_optimized.predict(att_lstm_test_preds, nsgm_test_preds)
+        print(f"   Sample combined predictions (optimized weights, first 5): {combined_predictions_optimized[:5]}")
+    else:
+        print("   Skipping prediction with optimized weights as weights were not trained.")
 
-    print("\nSample combined predictions:", combined_predictions[:5])
-    print("Ensemble weights used:", ensemble_model.weights)
+    # --- Test with 'fixed' weights ---
+    print("\n2. Testing with 'fixed' weights:")
+    ensemble_model_fixed = EnsembleModel(optimization_method='fixed', random_seed=42)
+    # actual_val_targets are ignored for 'fixed' method but passed for consistency
+    ensemble_model_fixed.train_weights(att_lstm_val_preds, nsgm_val_preds, actual_val_targets)
+    print(f"   Fixed Weights (ATT-LSTM, NSGM): {ensemble_model_fixed.weights}")
 
-    # Test with fixed weights
-    ensemble_model_fixed = EnsembleModel(optimization_method='fixed')
-    ensemble_model_fixed.train_weights(att_lstm_val_preds, nsgm_val_preds, actual_val_targets) # val_targets are ignored for fixed method
+    # Make combined predictions with fixed weights
     combined_predictions_fixed = ensemble_model_fixed.predict(att_lstm_test_preds, nsgm_test_preds)
-    print("\nSample combined predictions (fixed weights):", combined_predictions_fixed[:5])
-    print("Ensemble weights used (fixed):", ensemble_model_fixed.weights)
+    print(f"   Sample combined predictions (fixed weights, first 5): {combined_predictions_fixed[:5]}")
+
+    print("\n--- End of EnsembleModel Module Test ---")
 
 
