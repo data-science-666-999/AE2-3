@@ -15,26 +15,30 @@ import time # Import time module for performance testing
 # --- Module 5: Integrate and Test the Full Model ---
 
 class FullStockPredictionModel:
-    def __init__(self, stock_ticker="AEL", years_of_data=10, look_back=60, random_seed=42, lasso_alpha=0.005): # Added lasso_alpha
+    def __init__(self, stock_ticker="AEL", years_of_data=10, look_back=60, random_seed=42, lasso_alpha=0.005, use_differencing=False):
         self.stock_ticker = stock_ticker
         self.years_of_data = years_of_data
         self.look_back = look_back
         self.random_seed = random_seed
-        self.lasso_alpha = lasso_alpha # Store lasso_alpha
+        self.lasso_alpha = lasso_alpha
+        self.use_differencing = use_differencing # Store differencing choice
 
         self.data_preprocessor = DataPreprocessor(
             stock_ticker=self.stock_ticker,
             years_of_data=self.years_of_data,
             random_seed=self.random_seed,
-            lasso_alpha=self.lasso_alpha # Pass to DataPreprocessor
+            lasso_alpha=self.lasso_alpha,
+            use_differencing=self.use_differencing # Pass to DataPreprocessor
         )
         self.att_lstm_model = None
-        # self.ensemble_model = EnsembleModel(...) # Removed
-        self.data_scaler = None
+        self.target_scaler = None # Scaler for the target variable
         self.processed_df = None
-        self.selected_features = None # To store selected feature names
-        self.df_all_indicators = None # To store dataframe with all indicators for volatility analysis
-        self.plots_dir_path = "performance_evaluation_report" # Added instance variable for plot directory
+        self.selected_features = None
+        self.df_all_indicators = None
+        self.first_price_before_diff = None # For inverse differencing
+        # self.plots_dir_path will be set dynamically in train_and_evaluate
+        self.plots_dir_path = None
+        self.actual_target_column_name_for_inv_transform = None # Store the original target name before it might be changed by differencing suffix
 
     def _create_sequences(self, data, target_column_name="Close"):
         # Ensure target_column_name is in data.columns
@@ -56,25 +60,69 @@ class FullStockPredictionModel:
         # 1. Data Acquisition and Preprocessing
         print("Starting Data Preprocessing...")
         preprocessing_start_time = time.time()
-        # Update to receive all return values from preprocess
-        self.processed_df, self.data_scaler, self.selected_features, self.df_all_indicators = \
+
+        # Store the original target column name from DataPreprocessor instance, before it might get a suffix
+        # This assumes the target is 'Close' initially. If DataPreprocessor changes it (e.g. 'Close_AEX'),
+        # this needs to be robust. For now, assuming 'Close' is the base.
+        # A better way might be to get this from data_preprocessor after it determines the actual name.
+        # Let's assume self.data_preprocessor.stock_ticker gives us '^AEX', so target is 'Close'.
+        # If yfinance data adds ticker to column name, it becomes 'Close_^AEX'.
+        # The data_preprocessor._apply_lasso_feature_selection now handles this flattening.
+        # The target_column_name returned by processed_df.columns[-1] is the one to use for sequence creation.
+        # However, for inverse differencing, we need the *original* non-differenced values.
+
+        # DataPreprocessor.preprocess() now returns:
+        # scaled_df, target_scaler, selected_features_names, df_with_all_indicators_cleaned, first_price_before_diff
+        self.processed_df, self.target_scaler, self.selected_features, self.df_all_indicators, self.first_price_before_diff = \
             self.data_preprocessor.preprocess()
+
         preprocessing_end_time = time.time()
         metrics_log['preprocessing_time_seconds'] = preprocessing_end_time - preprocessing_start_time
         print(f"Data Preprocessing completed in {metrics_log['preprocessing_time_seconds']:.2f} seconds.")
         print(f"Selected features by LASSO: {self.selected_features}")
         metrics_log['selected_features_count'] = len(self.selected_features)
         metrics_log['selected_features_names'] = self.selected_features
+        metrics_log['used_differencing'] = self.use_differencing
+        if self.use_differencing:
+            print(f"Differencing was used. First price before diff: {self.first_price_before_diff}")
+
+        # --- Create unique directory for this run's plots ---
+        # Use relevant parameters to name the directory for clarity
+        run_specific_plot_dir_name = f"alpha_{self.lasso_alpha}_diff_{self.use_differencing}_lb_{self.look_back}_yrs_{self.years_of_data}"
+        self.plots_dir_path = os.path.join("performance_evaluation_report", run_specific_plot_dir_name)
+        os.makedirs(self.plots_dir_path, exist_ok=True)
+        print(f"Plots for this run will be saved to: {os.path.abspath(self.plots_dir_path)}")
+        metrics_log['plot_directory'] = self.plots_dir_path
 
 
         if self.processed_df.empty:
             print("Error: Preprocessed data is empty. Aborting training.")
-            return None # Return None to indicate failure
+            return None
 
-        target_column_name = self.processed_df.columns[-1] # Target is the last column
-        print(f"Dynamically determined target column name for model: {target_column_name}")
+        # This is the name of the target column in the *final* processed_df (could be differenced)
+        current_target_column_name = self.processed_df.columns[-1]
+        print(f"Target column name for model training (in processed_df): {current_target_column_name}")
 
-        X_seq, y_seq = self._create_sequences(self.processed_df, target_column_name=target_column_name)
+        # Store the actual name of the target column from the *original* (but NaN-cleaned and LASSOed) data
+        # This is needed if we have to reconstruct from differenced predictions.
+        # df_all_indicators has original values but is already NaN-cleaned and has features.
+        # The target column name in df_all_indicators should be the original name.
+        # We need the target column name as it appears *before* any potential differencing.
+        # This name is consistent in df_with_all_indicators_cleaned (returned by preprocess, now in self.df_all_indicators)
+        # and in the original non-differenced processed_data_for_scaling.
+        # Let's assume the *last* column of self.df_all_indicators (if it exists and is from before differencing)
+        # or rely on a known convention if that's safer.
+        # If self.df_all_indicators exists and is not empty, its last column should be the non-differenced target.
+        if self.df_all_indicators is not None and not self.df_all_indicators.empty:
+            self.actual_target_column_name_for_inv_transform = self.df_all_indicators.columns[-1]
+            print(f"Actual target column name for inverse transform (from df_all_indicators): {self.actual_target_column_name_for_inv_transform}")
+        else:
+            # Fallback if df_all_indicators is not available (should not happen with current flow)
+            self.actual_target_column_name_for_inv_transform = "Close" # Default assumption
+            print(f"Warning: df_all_indicators not available, falling back to default target name for inv transform: {self.actual_target_column_name_for_inv_transform}")
+
+
+        X_seq, y_seq = self._create_sequences(self.processed_df, target_column_name=current_target_column_name)
         if len(X_seq) == 0:
             print("Error: No sequences created from processed data. Aborting.")
             return None
@@ -94,41 +142,47 @@ class FullStockPredictionModel:
         print(f"X_test_seq: {X_test_seq.shape}, y_test_seq: {y_test_seq.shape}")
 
         # 2. Train Attention-Enhanced LSTM (ATT-LSTM) Module
-        # Define hypothetical best hyperparameters (as if loaded from a completed tuning run)
-        # These would replace the default self.lstm_units, self.dense_units, etc.
-        hypothetical_best_hps = {
-            'num_lstm_layers': 2,
-            'lstm_units_1': 256,
-            'lstm_units_2': 128,
-            'num_dense_layers': 2,
-            'dense_units_1': 128,
-            'dense_units_2': 64,
-            'learning_rate': 0.0005,
-            'dropout_rate_lstm': 0.25, # Adjusted for example
-            'dropout_rate_dense': 0.35, # Adjusted for example
-            'activation_dense': 'relu'
+        # Define placeholder for best hyperparameters (to be updated after tuning)
+        # These are example values and should be replaced by the actual results from tune_att_lstm.py
+        # The look_back used here should also correspond to the one that yielded the best HPs.
+        # For now, we'll keep the existing look_back from the class instance.
+        # A more advanced setup would load these from a file saved by the tuning script.
+        tuned_best_hps = {
+            'num_lstm_layers': 2,       # Example, replace with tuned value
+            'lstm_units_1': 200,        # Example, replace with tuned value
+            'lstm_units_2': 100,        # Example, replace with tuned value (if num_lstm_layers > 1)
+            'num_dense_layers': 1,      # Example, replace with tuned value
+            'dense_units_1': 100,       # Example, replace with tuned value
+            # 'dense_units_2': 50,        # Example (if num_dense_layers > 1)
+            'learning_rate': 0.001,     # Example, replace with tuned value
+            'dropout_rate_lstm': 0.2,   # Example, replace with tuned value
+            'dropout_rate_dense': 0.2,  # Example, replace with tuned value
+            'activation_dense': 'relu'  # Example, replace with tuned value
         }
-        print(f"\n--- Using Hypothetical Best Hyperparameters for ATT-LSTM ---")
-        for key, value in hypothetical_best_hps.items():
+        # TODO: Load actual best HPs from the tuning script's output when available.
+        # For now, using these placeholders.
+        print(f"\n--- Using Tuned (Placeholder) Hyperparameters for ATT-LSTM ---")
+        for key, value in tuned_best_hps.items():
             print(f"  {key}: {value}")
         print("------------------------------------------------------------")
         print(f"--- Final Training Parameters for ATT-LSTM ---")
         print(f"  Epochs: {epochs}")
         print(f"  Batch Size: {batch_size}")
+        print(f"  Look_back: {self.look_back}") # Display the look_back being used
         print("------------------------------------------------------------")
 
         input_shape_lstm = (X_train_seq.shape[1], X_train_seq.shape[2]) # (timesteps, features)
 
-        # Instantiate ATTLSTMModel with the hypothetical best HPs
+        # Instantiate ATTLSTMModel with the tuned HPs
         self.att_lstm_model = ATTLSTMModel(
             input_shape=input_shape_lstm,
-            look_back=self.look_back, # look_back is fixed for data prep, model needs to know it
+            look_back=self.look_back, # This look_back should align with the one used for tuning
             random_seed=self.random_seed,
-            model_params=hypothetical_best_hps # Pass the dictionary here
+            model_params=tuned_best_hps # Pass the dictionary here
         )
 
-        # Build the model using these parameters (since hp=None, it will use model_params)
-        self.att_lstm_model.build_model()
+        # Build the model using these parameters
+        self.att_lstm_model.build_model() # Since hp=None, it will use model_params
 
         # Train the model
         print("Starting ATT-LSTM Model Training...")
@@ -155,13 +209,85 @@ class FullStockPredictionModel:
         print(f"Test set prediction completed in {metrics_log['test_set_prediction_time_seconds']:.2f} seconds.")
 
         # Inverse transform predictions and actual values to original scale
-        dummy_preds_lstm = np.zeros((len(att_lstm_test_preds_scaled), self.processed_df.shape[1]))
-        dummy_preds_lstm[:, self.processed_df.columns.get_loc(target_column_name)] = att_lstm_test_preds_scaled
-        original_att_lstm_test_preds = self.data_scaler.inverse_transform(dummy_preds_lstm)[:, self.processed_df.columns.get_loc(target_column_name)]
 
-        dummy_actuals = np.zeros((len(y_test_seq), self.processed_df.shape[1]))
-        dummy_actuals[:, self.processed_df.columns.get_loc(target_column_name)] = y_test_seq
-        original_y_test_seq = self.data_scaler.inverse_transform(dummy_actuals)[:, self.processed_df.columns.get_loc(target_column_name)]
+        # The target_scaler is now specific to the target column.
+        # We need to reshape predictions and actuals to be 2D for the scaler.
+        att_lstm_test_preds_scaled_2d = att_lstm_test_preds_scaled.reshape(-1, 1)
+        y_test_seq_2d = y_test_seq.reshape(-1, 1)
+
+        # Inverse scale the predictions and actuals (which are potentially differenced and scaled)
+        inv_scaled_preds = self.target_scaler.inverse_transform(att_lstm_test_preds_scaled_2d).flatten()
+        inv_scaled_actuals = self.target_scaler.inverse_transform(y_test_seq_2d).flatten()
+
+        if self.use_differencing:
+            print("Applying inverse differencing to predictions and actuals...")
+            if self.first_price_before_diff is None:
+                raise ValueError("Cannot inverse difference: first_price_before_diff is not set.")
+
+            # To reconstruct actuals: we need the original values that led to y_test_seq.
+            # y_test_seq comes from X_test_seq, which are indices from processed_df.
+            # The actual historical prices corresponding to the start of the y_test_seq period are needed.
+            # The test_indices are from processed_df's index.
+            # We need the actual price *before* the first predicted difference.
+
+            # Find the index in the original, non-differenced, NaN-cleaned, feature-selected data
+            # that corresponds to the day *before* the first prediction in y_test_seq.
+            # y_test_seq starts after train and val splits.
+            # The first element of y_test_seq corresponds to X_test_seq[0].
+            # X_test_seq[0] is a sequence of length self.look_back.
+            # The value y_test_seq[0] is the target for the day *after* X_test_seq[0][-1].
+            # The original index for y_test_seq[0] is test_indices[0].
+            # If differencing was used, inv_scaled_actuals[0] is P[t] - P[t-1].
+            # We need P[t-1] to reconstruct P[t].
+            # P[t-1] corresponds to the actual close price at index test_indices[0] - 1 day.
+            # This price must come from self.df_all_indicators (which has original values).
+
+            # Get the actual prices from df_all_indicators corresponding to the time steps of y_test_seq
+            # These are the prices *before* the differencing operation was applied to create the target.
+            # test_indices = self.processed_df.index[-len(y_test_seq):] # This is correct for processed_df
+            # The `df_all_indicators` should be indexed appropriately.
+            # If `processed_df` had its first row dropped due to differencing, `test_indices` reflects that.
+            # `self.df_all_indicators` was also aligned to `processed_df.index` in `DataPreprocessor`.
+
+            if self.df_all_indicators is None or self.actual_target_column_name_for_inv_transform not in self.df_all_indicators.columns:
+                 raise ValueError("df_all_indicators or the target column for inverse transform is not available for inverse differencing.")
+
+            # Get the price on the day *before* the first prediction.
+            # The first y_test_seq value corresponds to index `test_indices[0]`.
+            # The actual value for this is `self.df_all_indicators.loc[test_indices[0], self.actual_target_column_name_for_inv_transform]`
+            # The value *before* this is at `test_indices[0] - 1 day` (business day).
+            # This is tricky because test_indices might not be continuous if there were holidays.
+
+            # Simpler: The first value of inv_scaled_actuals is Y_diff[0] = Y[0] - Y_actual_at_lookback_end_for_Y[0]
+            # We need the Y_actual_at_lookback_end_for_Y[0] (the price just before the first difference).
+            # The first value in `y_seq` (before splitting) was based on `processed_data_for_scaling` (after NaN drop).
+            # `self.first_price_before_diff` is the first price in `processed_data_for_scaling`
+            # *before* it was differenced.
+            # The `y_seq` values are `processed_data_for_scaling[target_col_name_in_df].iloc[look_back:]`
+            # If differencing was applied, these `y_seq` are already differenced values.
+            # So, `inv_scaled_actuals` are the original differences.
+            # `inv_scaled_preds` are the predicted differences.
+
+            # To reconstruct prices from differences: Price[t] = Price[t-1] + Diff[t]
+            # We need the actual price just before the start of the y_test_seq.
+            # The `test_indices` are the dates for which `y_test_seq` values are the targets.
+            # The first prediction `inv_scaled_preds[0]` is the predicted change for `test_indices[0]`.
+            # We need the actual price at `test_indices[0] - 1 day`.
+
+            # Find the index of the data point in df_all_indicators that immediately precedes the first test point.
+            first_test_date_index_loc = self.df_all_indicators.index.get_loc(test_indices[0])
+            if first_test_date_index_loc == 0:
+                raise ValueError("Cannot get previous day price for inverse differencing: first test sample is the first data point.")
+            price_before_first_pred = self.df_all_indicators[self.actual_target_column_name_for_inv_transform].iloc[first_test_date_index_loc - 1]
+
+            original_att_lstm_test_preds = price_before_first_pred + np.cumsum(inv_scaled_preds)
+            original_y_test_seq = price_before_first_pred + np.cumsum(inv_scaled_actuals)
+            print(f"  Reconstructed first actual price: {original_y_test_seq[0]:.2f} (from {price_before_first_pred:.2f} + {inv_scaled_actuals[0]:.2f})")
+            print(f"  Reconstructed first predicted price: {original_att_lstm_test_preds[0]:.2f} (from {price_before_first_pred:.2f} + {inv_scaled_preds[0]:.2f})")
+
+        else: # No differencing was used
+            original_att_lstm_test_preds = inv_scaled_preds
+            original_y_test_seq = inv_scaled_actuals
 
         # Evaluate performance
         print("\n--- Model Performance on Test Set (Original Scale) ---")
@@ -370,122 +496,141 @@ class FullStockPredictionModel:
 
 # Example Usage (Run the full model)
 if __name__ == '__main__':
-    # --- Configurable parameters for a single test run ---
-    test_stock_ticker = '^AEX'
-    test_years_of_data = 10   # Changed to 10 years for extended testing
-    test_look_back = 60
-    test_lasso_alpha = 0.005  # Using a default alpha for this run
-    test_epochs = 150
-    test_batch_size = 32
-    results = None # Initialize results to None
+    # --- Configuration for Experimental Runs ---
+    # General parameters
+    run_stock_ticker = '^AEX'
+    run_years_of_data = 3  # Using 3 years for quicker test runs of this main script
+    run_look_back = 60
+    run_epochs = 50         # Reduced epochs for quicker tests
+    run_batch_size = 32
+    run_use_differencing = False # Set to True to test with differencing
 
-    print(f"\n--- Starting Single Test Run: Ticker={test_stock_ticker}, Years={test_years_of_data}, LookBack={test_look_back}, Alpha={test_lasso_alpha} ---")
+    # LASSO alpha values to test
+    lasso_alpha_values_to_test = [0.005, 0.01] # Reduced set for quicker tests
+    # To run a single test with a specific alpha:
+    # lasso_alpha_values_to_test = [0.005]
 
-    full_model = FullStockPredictionModel(
-        stock_ticker=test_stock_ticker,
-        years_of_data=test_years_of_data,
-        look_back=test_look_back,
-        random_seed=42,
-        lasso_alpha=test_lasso_alpha
-    )
+    all_run_results = {}
+    results_df_list = [] # For creating a summary DataFrame
 
-    overall_start_time = time.time()
-    results = full_model.train_and_evaluate(
-        epochs=test_epochs,
-        batch_size=test_batch_size
-    )
-    overall_end_time = time.time()
-    overall_duration = overall_end_time - overall_start_time
-    print(f"--- Full Model Training and Evaluation Took: {overall_duration:.2f} seconds ---")
+    print(f"--- Starting Experimental Runs ---")
+    print(f"Stock: {run_stock_ticker}, Years: {run_years_of_data}, Look_back: {run_look_back}, Epochs: {run_epochs}, Differencing: {run_use_differencing}")
 
-    if results: # Check if results were returned (not empty on error)
-        print("\n--- Final Results from Test Run ---")
-        if results.get("att_lstm_preds") is not None:
-             print("Final ATT-LSTM Predictions (first 5):", results["att_lstm_preds"][:5])
-        print("Actual Values (first 5):", results["actual_values"][:5])
+    for alpha_val in lasso_alpha_values_to_test:
+        print(f"\n--- Running Experiment with LASSO alpha: {alpha_val}, Differencing: {run_use_differencing} ---")
 
-        print("\nDetailed Metrics from Test Run:")
-        if "metrics" in results:
-            for key, value in results["metrics"].items():
-                if isinstance(value, float):
-                    print(f"  {key.replace('_', ' ').title()}: {value:.4f}")
-                elif isinstance(value, list):
-                     print(f"  {key.replace('_', ' ').title()}: {value}")
-                else:
-                    print(f"  {key.replace('_', ' ').title()}: {value}")
+        # Create a unique ID for this run configuration for storing results
+        run_id = f"alpha_{alpha_val}_diff_{run_use_differencing}_lb_{run_look_back}_yrs_{run_years_of_data}"
+
+        full_model_instance = FullStockPredictionModel(
+            stock_ticker=run_stock_ticker,
+            years_of_data=run_years_of_data,
+            look_back=run_look_back,
+            random_seed=42,
+            lasso_alpha=alpha_val,
+            use_differencing=run_use_differencing
+        )
+
+        run_start_time = time.time()
+        # The train_and_evaluate method uses the HPs defined within its scope
+        # (currently placeholders, ideally loaded based on tuned look_back)
+        current_run_results = full_model_instance.train_and_evaluate(
+            epochs=run_epochs,
+            batch_size=run_batch_size
+            # test_size and val_size use defaults in train_and_evaluate
+        )
+        run_end_time = time.time()
+        run_duration = run_end_time - run_start_time
+        print(f"--- Experiment with {run_id} Took: {run_duration:.2f} seconds ---")
+
+        if current_run_results and "metrics" in current_run_results:
+            all_run_results[run_id] = current_run_results["metrics"]
+
+            # Prepare data for DataFrame summary
+            summary_data = {
+                "run_id": run_id,
+                "lasso_alpha": alpha_val,
+                "differencing": run_use_differencing,
+                "look_back": run_look_back,
+                "years_data": run_years_of_data,
+                **current_run_results["metrics"] # Unpack all metrics
+            }
+            results_df_list.append(summary_data)
+
+            print(f"  Key Metrics for {run_id}:")
+            print(f"    RMSE: {current_run_results['metrics'].get('overall_rmse', 'N/A'):.4f}")
+            print(f"    MAPE: {current_run_results['metrics'].get('overall_mape', 'N/A'):.2f}%")
+            print(f"    Bias (ME): {current_run_results['metrics'].get('bias_me', 'N/A'):.4f}")
+            print(f"    Selected Features: {current_run_results['metrics'].get('selected_features_count', 'N/A')}")
+
+            # Production readiness testing (prediction speed)
+            if hasattr(full_model_instance, 'att_lstm_model') and full_model_instance.att_lstm_model and \
+               hasattr(full_model_instance.att_lstm_model, 'model') and full_model_instance.att_lstm_model.model is not None:
+                if full_model_instance.processed_df is not None and not full_model_instance.processed_df.empty:
+                    num_features = full_model_instance.processed_df.shape[1]
+                    sample_raw_data = np.random.rand(full_model_instance.look_back, num_features).astype(np.float32)
+                    single_instance_input = np.expand_dims(sample_raw_data, axis=0)
+                    _ = full_model_instance.att_lstm_model.predict(single_instance_input) # Warm-up
+
+                    single_pred_times = [time.time() for _ in range(10)]
+                    for i in range(10):
+                        _ = full_model_instance.att_lstm_model.predict(single_instance_input)
+                        single_pred_times[i] = time.time() - single_pred_times[i]
+                    avg_single_pred_time_ms = np.mean(single_pred_times) * 1000
+                    all_run_results[run_id]["latency_single_pred_ms"] = avg_single_pred_time_ms
+                    results_df_list[-1]["latency_single_pred_ms"] = avg_single_pred_time_ms # Add to df list
+                    print(f"    Avg Single Prediction Time: {avg_single_pred_time_ms:.2f} ms")
         else:
-            print("  Metrics not available.")
+            print(f"  Run {run_id} did not produce results or metrics.")
+        print(f"--- End of Experiment for {run_id} ---")
 
-        # --- Production Readiness Testing (Simulated) ---
-        if hasattr(full_model, 'att_lstm_model') and full_model.att_lstm_model and \
-           hasattr(full_model.att_lstm_model, 'model') and full_model.att_lstm_model.model is not None:
-            print("\n--- Production Readiness Testing (Prediction Speed) ---")
-            if full_model.processed_df is not None and not full_model.processed_df.empty:
-                num_features = full_model.processed_df.shape[1]
-                sample_raw_data = np.random.rand(full_model.look_back, num_features).astype(np.float32)
-                single_instance_input = np.expand_dims(sample_raw_data, axis=0)
+    print("\n\n--- Summary of All Experimental Runs (Console) ---")
+    if all_run_results:
+        for run_id_key, metrics in all_run_results.items():
+            print(f"\nResults for Configuration: {run_id_key}")
+            print(f"  Plot Directory: {metrics.get('plot_directory', 'N/A')}")
+            print(f"  Selected Features Count: {metrics.get('selected_features_count', 'N/A')}")
+            print(f"  Overall RMSE: {metrics.get('overall_rmse', 'N/A'):.4f}")
+            print(f"  Overall MAPE: {metrics.get('overall_mape', 'N/A'):.2f}%")
+            print(f"  Bias (Mean Error): {metrics.get('bias_me', 'N/A'):.4f}")
+            # Add more metrics as needed
+    else:
+        print("No results collected from experimental runs for console summary.")
 
-                print("Performing warm-up prediction for single instance...")
-                _ = full_model.att_lstm_model.predict(single_instance_input)
+    # --- Save all_run_results to a JSON file and DataFrame to CSV ---
+    if all_run_results:
+        # Save to JSON
+        results_json_path = os.path.join("performance_evaluation_report", "all_experimental_run_metrics.json")
+        os.makedirs("performance_evaluation_report", exist_ok=True)
+        try:
+            with open(results_json_path, 'w') as f:
+                # Convert list of feature names to string for JSON compatibility if they are lists
+                serializable_results = {}
+                for run_key, metrics_dict in all_run_results.items():
+                    serializable_metrics = {}
+                    for k, v in metrics_dict.items():
+                        if k == 'selected_features_names' and isinstance(v, list):
+                            serializable_metrics[k] = ", ".join(v)
+                        else:
+                            serializable_metrics[k] = v
+                    serializable_results[run_key] = serializable_metrics
+                pd.io.json.dump(serializable_results, f, indent=4) # Use pandas json dump for better handling of numpy types potentially
+            print(f"\nAll experimental run metrics saved to: {results_json_path}")
+        except Exception as e:
+            print(f"Error saving metrics to JSON: {e}")
 
-                num_single_runs = 10
-                single_pred_times = []
-                print(f"Timing single instance prediction over {num_single_runs} runs...")
-                for i in range(num_single_runs):
-                    start_time = time.time()
-                    _ = full_model.att_lstm_model.predict(single_instance_input)
-                    end_time = time.time()
-                    single_pred_times.append(end_time - start_time)
+        # Save to CSV
+        results_csv_path = os.path.join("performance_evaluation_report", "all_experimental_run_summary.csv")
+        try:
+            summary_df = pd.DataFrame(results_df_list)
+            # Convert list of feature names to string for CSV compatibility
+            if 'selected_features_names' in summary_df.columns:
+                 summary_df['selected_features_names'] = summary_df['selected_features_names'].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
+            summary_df.to_csv(results_csv_path, index=False)
+            print(f"Summary of experimental run metrics saved to CSV: {results_csv_path}")
+        except Exception as e:
+            print(f"Error saving summary metrics to CSV: {e}")
 
-                avg_single_pred_time_ms = np.mean(single_pred_times) * 1000
-                print(f"Average single instance prediction time: {avg_single_pred_time_ms:.2f} ms (over {num_single_runs} runs)")
-                if results and "metrics" in results:
-                    results["metrics"]["latency_single_pred_ms"] = avg_single_pred_time_ms
-
-                batch_size_test = 32
-                batch_input = np.random.rand(batch_size_test, full_model.look_back, num_features).astype(np.float32)
-
-                print(f"Performing warm-up prediction for batch (size {batch_size_test})...")
-                _ = full_model.att_lstm_model.predict(batch_input)
-
-                num_batch_runs = 10
-                batch_pred_times = []
-                print(f"Timing batch prediction (size {batch_size_test}) over {num_batch_runs} runs...")
-                for i in range(num_batch_runs):
-                    start_time = time.time()
-                    _ = full_model.att_lstm_model.predict(batch_input)
-                    end_time = time.time()
-                    batch_pred_times.append(end_time - start_time)
-
-                avg_batch_pred_time_total_ms = np.mean(batch_pred_times) * 1000
-                avg_batch_pred_time_per_instance_ms = (np.mean(batch_pred_times) / batch_size_test) * 1000
-
-                print(f"Average batch ({batch_size_test} instances) prediction time: {avg_batch_pred_time_total_ms:.2f} ms (total)")
-                print(f"Average per-instance prediction time in batch: {avg_batch_pred_time_per_instance_ms:.2f} ms (over {num_batch_runs} runs)")
-
-                if results and "metrics" in results:
-                    results["metrics"]["latency_batch_total_ms"] = avg_batch_pred_time_total_ms
-                    results["metrics"]["latency_batch_per_instance_ms"] = avg_batch_pred_time_per_instance_ms
-            else:
-                print("Could not perform prediction speed test: processed_df not available.")
-        else:
-            print("ATT-LSTM model not available for production readiness testing.")
-    else: # if results is None
-        print("Model training and evaluation did not complete successfully for the test run.")
-
-    # --- Previous loop for LASSO alpha (commented out for single test run) ---
-    # lasso_alpha_values_to_test = [0.001, 0.005, 0.01, 0.02]
-    # all_results_by_alpha = {}
-    # for alpha_val in lasso_alpha_values_to_test:
-    #     print(f"\n--- Running Full Model Training & Evaluation for LASSO alpha: {alpha_val} ---")
-    #     full_model = FullStockPredictionModel(
-    #         stock_ticker='^AEX',
-    #         years_of_data=10, # This was the original value in the loop
-    #         look_back=60,
-    #         random_seed=42,
-    #         lasso_alpha=alpha_val
-    #     )
-    #     # ... (rest of the loop as before, including train_and_evaluate, and storing/printing results) ...
-    #     # ... and the summary print for all_results_by_alpha ...
+    print("\n--- All Experimental Runs Complete ---")
 
 
