@@ -32,11 +32,19 @@ class DataPreprocessor:
         df.rename(columns={'Adj Close': 'Adj_Close'}, inplace=True) # Standardize if needed
 
         print(f"Downloaded data shape: {df.shape}")
+
+        # Add time-based features
+        print("Adding time-based features...")
+        df['DayOfWeek'] = df.index.dayofweek # Monday=0, Sunday=6
+        df['Month'] = df.index.month
+        # Consider adding 'Year', 'WeekOfYear', 'DayOfYear' if they seem relevant and LASSO selects them
+        print(f"Shape after adding time-based features: {df.shape}")
+
         return df
 
     def _calculate_technical_indicators(self, df):
         print("Calculating technical indicators...")
-        # Ensure columns are correct type
+        # Ensure columns are correct type (Open, High, Low, Close, Volume already handled by yfinance)
         df['Open'] = df['Open'].astype(float)
         df['High'] = df['High'].astype(float)
         df['Low'] = df['Low'].astype(float)
@@ -88,10 +96,23 @@ class DataPreprocessor:
         # ROC (Rate of Change)
         df['ROC'] = ta.momentum.ROCIndicator(close=df['Close'].squeeze(), window=12, fillna=True).roc()
 
+        # ADX (Average Directional Index)
+        adx_indicator = ta.trend.ADXIndicator(
+            high=df['High'].squeeze(),
+            low=df['Low'].squeeze(),
+            close=df['Close'].squeeze(),
+            window=14,
+            fillna=True
+        )
+        df['ADX'] = adx_indicator.adx()
+        df['ADX_Pos'] = adx_indicator.adx_pos() # Positive Directional Indicator (+DI)
+        df['ADX_Neg'] = adx_indicator.adx_neg() # Negative Directional Indicator (-DI)
+
+
         print(f"Shape after adding all indicators: {df.shape}")
         return df
 
-    def _apply_lasso_feature_selection(self, df, target_column='Close', alpha=0.01):
+    def _apply_lasso_feature_selection(self, df, target_column='Close', alpha=0.005): # Reduced alpha
         print("Applying LASSO feature selection...")
         # Drop rows with NaN values introduced by rolling windows or yfinance missing days
         # It's critical to drop NaNs *before* splitting features and target
@@ -178,14 +199,17 @@ class DataPreprocessor:
         return final_df_for_scaling, selected_feature_names, lasso # Return LASSO model
 
     def preprocess(self):
-        stock_data = self._download_yfinance_data()
-        stock_data = self._calculate_technical_indicators(stock_data)
+        stock_data_downloaded = self._download_yfinance_data() # This now also adds time features
+        # Technical indicators should be calculated on data that includes base OHLCV but not yet time features if they interfere
+        # However, current time features (DayOfWeek, Month) are just numbers and should be fine.
+        # If more complex time features were added that are not numeric, they'd need care.
+        stock_data_with_indicators = self._calculate_technical_indicators(stock_data_downloaded.copy()) # Use a copy
 
         # For LASSO, we'll predict 'Close' based on other features.
         # The target 'Close' should be present in stock_data before this step.
-        # Make a copy to avoid SettingWithCopyWarning if stock_data is a slice
+        # Make a copy to avoid SettingWithCopyWarning if stock_data_with_indicators is a slice
         # Store the lasso model returned by _apply_lasso_feature_selection
-        processed_data_for_scaling, selected_features, lasso_model = self._apply_lasso_feature_selection(stock_data.copy(), target_column='Close')
+        processed_data_for_scaling, selected_features, lasso_model = self._apply_lasso_feature_selection(stock_data_with_indicators.copy(), target_column='Close')
         self.lasso_model = lasso_model # Store for access in main block
 
         if processed_data_for_scaling.empty:

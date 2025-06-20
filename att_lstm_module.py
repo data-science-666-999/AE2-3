@@ -18,17 +18,33 @@ from data_preprocessing_module import DataPreprocessor
 # --- Module 2: Attention-Enhanced LSTM (ATT-LSTM) Module ---
 
 class ATTLSTMModel:
-    def __init__(self, input_shape, lstm_units=64, dense_units=32, learning_rate=0.001, look_back=60, random_seed=42):
+    def __init__(self, input_shape, look_back=60, random_seed=42, model_params=None):
         self.input_shape = input_shape  # (timesteps, features)
-        self.lstm_units = lstm_units
-        self.dense_units = dense_units
-        self.learning_rate = learning_rate
         self.look_back = look_back
         self.model = None
         self.random_seed = random_seed
         tf.random.set_seed(self.random_seed)
         np.random.seed(self.random_seed)
-        # self.hp = None # hp object will be passed to build_model
+
+        # Store model parameters if provided, otherwise use defaults in build_model
+        self.model_params = model_params if model_params else {}
+
+        # Set default values for parameters that might be passed in model_params
+        # These will be overridden by model_params if keys exist,
+        # and used by build_model if hp object is None.
+        self.lstm_units_1 = self.model_params.get('lstm_units_1', 64)
+        self.lstm_units_2 = self.model_params.get('lstm_units_2', 64) # Default for potential second layer
+        self.num_lstm_layers = self.model_params.get('num_lstm_layers', 1)
+
+        self.dense_units_1 = self.model_params.get('dense_units_1', 32)
+        self.dense_units_2 = self.model_params.get('dense_units_2', 32) # Default for potential second layer
+        self.num_dense_layers = self.model_params.get('num_dense_layers', 1)
+
+        self.learning_rate = self.model_params.get('learning_rate', 0.001)
+        self.dropout_rate_lstm = self.model_params.get('dropout_rate_lstm', 0.2)
+        self.dropout_rate_dense = self.model_params.get('dropout_rate_dense', 0.2)
+        self.activation_dense = self.model_params.get('activation_dense', 'relu')
+
 
     def _create_sequences(self, data, target_column_index):
         # This method might be better placed in DataPreprocessor or main script
@@ -42,59 +58,85 @@ class ATTLSTMModel:
 
     def build_model(self, hp=None): # Accept hp object
         if hp: # Use hyperparameters from tuner if provided
-            lstm_units = hp.Int('lstm_units', min_value=32, max_value=256, step=32)
-            dense_units = hp.Int('dense_units', min_value=16, max_value=128, step=16)
-            learning_rate = hp.Float('learning_rate', min_value=1e-4, max_value=1e-2, sampling='log')
-            dropout_rate = hp.Float('dropout_rate', min_value=0.1, max_value=0.5, step=0.1)
-        else: # Use instance attributes if hp not provided (for direct instantiation and training)
-            lstm_units = self.lstm_units
-            dense_units = self.dense_units
+            num_lstm_layers = hp.Int('num_lstm_layers', min_value=1, max_value=2, step=1)
+            lstm_units_1 = hp.Int('lstm_units_1', min_value=32, max_value=512, step=32)
+            # Only define lstm_units_2 if num_lstm_layers is 2
+            if num_lstm_layers > 1:
+                lstm_units_2 = hp.Int('lstm_units_2', min_value=32, max_value=256, step=32)
+
+            num_dense_layers = hp.Int('num_dense_layers', min_value=1, max_value=2, step=1)
+            dense_units_1 = hp.Int('dense_units_1', min_value=32, max_value=256, step=32)
+            if num_dense_layers > 1:
+                dense_units_2 = hp.Int('dense_units_2', min_value=16, max_value=128, step=16)
+
+            learning_rate = hp.Float('learning_rate', min_value=1e-5, max_value=1e-2, sampling='log')
+            dropout_rate_lstm = hp.Float('dropout_rate_lstm', min_value=0.1, max_value=0.5, step=0.1)
+            dropout_rate_dense = hp.Float('dropout_rate_dense', min_value=0.1, max_value=0.5, step=0.1)
+            activation_dense = hp.Choice('activation_dense', values=['relu', 'tanh', 'elu'])
+
+        else: # Use instance attributes (from self.model_params or their defaults)
+            num_lstm_layers = self.num_lstm_layers
+            lstm_units_1 = self.lstm_units_1
+            lstm_units_2 = self.lstm_units_2 # Will be used if num_lstm_layers > 1
+
+            num_dense_layers = self.num_dense_layers
+            dense_units_1 = self.dense_units_1
+            dense_units_2 = self.dense_units_2 # Will be used if num_dense_layers > 1
+
             learning_rate = self.learning_rate
-            dropout_rate = 0.2 # Default if not tuning
+            dropout_rate_lstm = self.dropout_rate_lstm
+            dropout_rate_dense = self.dropout_rate_dense
+            activation_dense = self.activation_dense
 
         inputs = Input(shape=self.input_shape)
+        x = inputs
 
-        # LSTM layer to process sequences
-        # return_sequences=True is crucial for attention mechanism to attend over the sequence
-        lstm_out = LSTM(lstm_units, return_sequences=True)(inputs)
+        # LSTM layers
+        # First LSTM layer
+        x = LSTM(units=lstm_units_1,
+                 return_sequences=True, # Crucial: True if followed by another LSTM or Attention that sees all sequences
+                 dropout=dropout_rate_lstm if hp else 0.0,
+                 recurrent_dropout=dropout_rate_lstm if hp else 0.0
+                )(x)
 
-        # --- Attention Mechanism (using keras.ops for compatibility with KerasTensors) ---
-        # Query: last hidden state of LSTM
-        query = lstm_out[:, -1, :]
-        # Value and Key: all hidden states of LSTM
-        value = lstm_out
-        key = lstm_out
+        # Second LSTM layer (optional)
+        if num_lstm_layers > 1:
+            # The second (now last) LSTM layer also needs return_sequences=True for the attention mechanism
+            x = LSTM(units=lstm_units_2, # lstm_units_2 is defined if num_lstm_layers > 1
+                     return_sequences=True,
+                     dropout=dropout_rate_lstm if hp else 0.0,
+                     recurrent_dropout=dropout_rate_lstm if hp else 0.0
+                    )(x)
 
-        # Calculate attention scores (dot product between query and each key in the sequence)
-        # query_reshaped (batch, 1, units) * key (batch, timesteps, units) -> need to transpose key
-        query_reshaped = keras.ops.expand_dims(query, axis=1) # Shape: (batch_size, 1, units)
+        # --- Attention Mechanism (applied to the output of the last LSTM layer) ---
+        # Query: last hidden state of the final LSTM layer
+        query = x[:, -1, :]
+        # Value and Key: all hidden states of the final LSTM layer
+        value = x
+        key = x
 
-        # Transpose key for matrix multiplication: (batch_size, units, timesteps)
+        query_reshaped = keras.ops.expand_dims(query, axis=1)
         key_transposed = keras.ops.transpose(key, axes=(0, 2, 1))
+        scores = keras.ops.matmul(query_reshaped, key_transposed)
+        scores = keras.ops.squeeze(scores, axis=1)
+        attention_weights = keras.ops.softmax(scores, axis=-1)
+        attention_weights_reshaped = keras.ops.expand_dims(attention_weights, axis=-1)
+        context_vector = keras.ops.multiply(value, attention_weights_reshaped)
+        context_vector = keras.ops.sum(context_vector, axis=1)
 
-        # keras.ops.matmul handles batch dimensions correctly
-        scores = keras.ops.matmul(query_reshaped, key_transposed) # Shape: (batch_size, 1, timesteps)
-        scores = keras.ops.squeeze(scores, axis=1) # Shape: (batch_size, timesteps)
-
-        # Apply softmax to get attention weights
-        attention_weights = keras.ops.softmax(scores, axis=-1) # Shape: (batch_size, timesteps)
-
-        # Reshape attention_weights to (batch_size, timesteps, 1) for element-wise multiplication
-        attention_weights_reshaped = keras.ops.expand_dims(attention_weights, axis=-1) # Shape: (batch_size, timesteps, 1)
-
-        # Calculate context vector: weighted sum of values
-        # value (batch_size, timesteps, units) * attention_weights_reshaped (batch_size, timesteps, 1)
-        context_vector = keras.ops.multiply(value, attention_weights_reshaped) # Shape: (batch_size, timesteps, units)
-        context_vector = keras.ops.sum(context_vector, axis=1) # Sum over timesteps -> (batch_size, units)
-
-        # Concatenate the last LSTM output (query) with the context vector
-        # Both query and context_vector are now 2D tensors (batch_size, units)
         merged_output = Concatenate()([query, context_vector])
+        x = merged_output
 
         # Dense layers for prediction
-        # Use dense_units from hp or self, and dropout_rate from hp or default
-        x = Dense(dense_units, activation="relu")(merged_output)
-        x = Dropout(dropout_rate)(x) # Use tuned dropout rate or default
+        # First Dense layer
+        x = Dense(units=dense_units_1, activation=activation_dense if hp else 'relu')(x)
+        x = Dropout(dropout_rate_dense if hp else 0.2)(x)
+
+        # Second Dense layer (optional)
+        if num_dense_layers > 1:
+            x = Dense(units=dense_units_2, activation=activation_dense if hp else 'relu')(x) # dense_units_2 is defined if num_dense_layers > 1
+            x = Dropout(dropout_rate_dense if hp else 0.2)(x)
+
         outputs = Dense(1)(x) # Output a single value for stock price prediction
 
         # Create the model object

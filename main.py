@@ -6,35 +6,32 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 # Import modules
 from data_preprocessing_module import DataPreprocessor
 from att_lstm_module import ATTLSTMModel
-from nsgm1n_module import NSGM1NModel
-from ensemble_module import EnsembleModel
+# from nsgm1n_module import NSGM1NModel # Removed
+# from ensemble_module import EnsembleModel # Removed
 import matplotlib.pyplot as plt
 import os
+import time # Import time module for performance testing
 
 # --- Module 5: Integrate and Test the Full Model ---
 
 class FullStockPredictionModel:
-    def __init__(self, stock_ticker="AEL", years_of_data=5, look_back=60,
-                 lstm_units=64, dense_units=32, lstm_learning_rate=0.001,
-                 ensemble_optimization_method="mse_optimization", random_seed=42):
+    def __init__(self, stock_ticker="AEL", years_of_data=10, look_back=60, random_seed=42): # Simplified constructor
         self.stock_ticker = stock_ticker
-        self.years_of_data = years_of_data # New parameter
+        self.years_of_data = years_of_data
         self.look_back = look_back
-        self.lstm_units = lstm_units
-        self.dense_units = dense_units
-        self.lstm_learning_rate = lstm_learning_rate
-        self.ensemble_optimization_method = ensemble_optimization_method
+        # self.lstm_units, self.dense_units, self.lstm_learning_rate are no longer needed here
+        # as ATTLSTMModel will be configured by model_params (hypothetical HPs)
+        # self.ensemble_optimization_method = ensemble_optimization_method # Removed
         self.random_seed = random_seed
 
-        # Updated DataPreprocessor instantiation
         self.data_preprocessor = DataPreprocessor(
             stock_ticker=self.stock_ticker,
             years_of_data=self.years_of_data,
             random_seed=self.random_seed
         )
-        self.att_lstm_model = None # Initialized after data preprocessing to get input_shape
-        self.nsgm_model = NSGM1NModel()
-        self.ensemble_model = EnsembleModel(optimization_method=self.ensemble_optimization_method, random_seed=self.random_seed)
+        self.att_lstm_model = None
+        # self.nsgm_model = NSGM1NModel() # Removed
+        # self.ensemble_model = EnsembleModel(...) # Removed
         self.data_scaler = None
         self.processed_df = None
 
@@ -88,120 +85,58 @@ class FullStockPredictionModel:
         print(f"X_test_seq: {X_test_seq.shape}, y_test_seq: {y_test_seq.shape}")
 
         # 2. Train Attention-Enhanced LSTM (ATT-LSTM) Module
+        # Define hypothetical best hyperparameters (as if loaded from a completed tuning run)
+        # These would replace the default self.lstm_units, self.dense_units, etc.
+        hypothetical_best_hps = {
+            'num_lstm_layers': 2,
+            'lstm_units_1': 256,
+            'lstm_units_2': 128,
+            'num_dense_layers': 2,
+            'dense_units_1': 128,
+            'dense_units_2': 64,
+            'learning_rate': 0.0005,
+            'dropout_rate_lstm': 0.25, # Adjusted for example
+            'dropout_rate_dense': 0.35, # Adjusted for example
+            'activation_dense': 'relu'
+        }
+        print(f"\n--- Using Hypothetical Best Hyperparameters for ATT-LSTM ---")
+        for key, value in hypothetical_best_hps.items():
+            print(f"  {key}: {value}")
+        print("------------------------------------------------------------")
+
+
         input_shape_lstm = (X_train_seq.shape[1], X_train_seq.shape[2]) # (timesteps, features)
+
+        # Instantiate ATTLSTMModel with the hypothetical best HPs
         self.att_lstm_model = ATTLSTMModel(
-            input_shape=input_shape_lstm, 
-            lstm_units=self.lstm_units, 
-            dense_units=self.dense_units, 
-            learning_rate=self.lstm_learning_rate, 
-            look_back=self.look_back,
-            random_seed=self.random_seed
+            input_shape=input_shape_lstm,
+            look_back=self.look_back, # look_back is fixed for data prep, model needs to know it
+            random_seed=self.random_seed,
+            model_params=hypothetical_best_hps # Pass the dictionary here
         )
+
+        # Build the model using these parameters (since hp=None, it will use model_params)
         self.att_lstm_model.build_model()
+
+        # Train the model
+        # Note: epochs and batch_size for this final training could also be part of HPs,
+        # but for now, we use the ones passed to train_and_evaluate.
         self.att_lstm_model.train(X_train_seq, y_train_seq, X_val_seq, y_val_seq, epochs=epochs, batch_size=batch_size)
 
         # Predict on test set for LSTM
         att_lstm_test_preds = self.att_lstm_model.predict(X_test_seq).flatten()
 
-        # --- NSGM and Ensemble sections are temporarily bypassed for ATT-LSTM focus ---
-        # 3. Train Cyclic Multidimensional Gray Model (NSGM(1,N)) Module
-        # NSGM expects target as first column. DataPreprocessor output has target as last.
-        # Create a view of processed_df with target as first column for NSGM training and prediction prep.
-        cols_for_nsgm = [target_column_name] + [col for col in self.processed_df.columns if col != target_column_name]
-        processed_df_nsgm_ordered = self.processed_df[cols_for_nsgm]
-
-        # Determine end index for NSGM training data (up to the end of LSTM's y_train_seq)
-        # Original indices of y_train_seq elements in the full y_seq:
-        # y_seq corresponds to processed_df from look_back onwards.
-        # So, the actual data points in processed_df used for y_train_seq start at index `look_back`
-        # and go up to `look_back + len(y_train_seq) -1`.
-        # The NSGM model is trained on the raw values up to this point.
-        nsgm_train_data_end_idx_in_processed_df = self.look_back + len(y_train_seq)
-        nsgm_train_df_for_model = processed_df_nsgm_ordered.iloc[:nsgm_train_data_end_idx_in_processed_df]
-
-        nsgm_X_train_model = nsgm_train_df_for_model.iloc[:, 1:].values # Related series
-        nsgm_y_train_model = nsgm_train_df_for_model.iloc[:, 0].values  # Primary series
-
-        print(f"\nTraining NSGM(1,N) model on data up to index {nsgm_train_data_end_idx_in_processed_df-1} of processed_df...")
-        print(f"NSGM training data shape: X={nsgm_X_train_model.shape}, y={nsgm_y_train_model.shape}")
-        self.nsgm_model.train(nsgm_X_train_model, nsgm_y_train_model)
-
-        # Predict on validation and test sets for NSGM
-        # These predictions are one-step-ahead based on a rolling window.
-        att_lstm_val_preds = self.att_lstm_model.predict(X_val_seq).flatten() # Needed for ensemble training
-
-        nsgm_val_preds = []
-        print("Generating NSGM predictions for validation set...")
-        for i in range(len(X_val_seq)): # X_val_seq corresponds to y_val_seq
-            # The sequence for predicting y_val_seq[i] ends right before the y_val_seq[i]'th point in processed_df
-            # Original index of y_val_seq[i] in y_seq is len(y_train_seq) + i
-            # Corresponding end index in processed_df for the *sequence input* is look_back + len(y_train_seq) + i -1
-            sequence_end_idx_in_processed_df = self.look_back + len(y_train_seq) + i -1
-            sequence_start_idx_in_processed_df = sequence_end_idx_in_processed_df - self.look_back + 1
-
-            current_nsgm_sequence = processed_df_nsgm_ordered.iloc[sequence_start_idx_in_processed_df : sequence_end_idx_in_processed_df + 1].values
-            if current_nsgm_sequence.shape[0] == self.look_back:
-                 nsgm_val_preds.append(self.nsgm_model.predict(current_nsgm_sequence))
-            else: # Should not happen with correct indexing if data is contiguous
-                 print(f"Warning: Incorrect sequence length for NSGM val pred at index {i}. Got {current_nsgm_sequence.shape[0]}, expected {self.look_back}. Appending NaN.")
-                 nsgm_val_preds.append(np.nan) # Or handle appropriately
-        nsgm_val_preds = np.array(nsgm_val_preds).flatten()
-        # Handle any NaNs from failed predictions if necessary, e.g., by forward fill or mean
-        if np.isnan(nsgm_val_preds).any():
-            print(f"Warning: NaNs found in NSGM validation predictions. Count: {np.isnan(nsgm_val_preds).sum()}")
-            # Simple ffill for now, more robust handling might be needed
-            temp_series = pd.Series(nsgm_val_preds)
-            temp_series.ffill(inplace=True)
-            temp_series.bfill(inplace=True) # bfill for any leading NaNs
-            nsgm_val_preds = temp_series.values
-
-
-        nsgm_test_preds = []
-        print("Generating NSGM predictions for test set...")
-        for i in range(len(X_test_seq)): # X_test_seq corresponds to y_test_seq
-            # Original index of y_test_seq[i] in y_seq is len(y_train_seq) + len(y_val_seq) + i
-            sequence_end_idx_in_processed_df = self.look_back + len(y_train_seq) + len(y_val_seq) + i - 1
-            sequence_start_idx_in_processed_df = sequence_end_idx_in_processed_df - self.look_back + 1
-
-            current_nsgm_sequence = processed_df_nsgm_ordered.iloc[sequence_start_idx_in_processed_df : sequence_end_idx_in_processed_df + 1].values
-            if current_nsgm_sequence.shape[0] == self.look_back:
-                nsgm_test_preds.append(self.nsgm_model.predict(current_nsgm_sequence))
-            else:
-                print(f"Warning: Incorrect sequence length for NSGM test pred at index {i}. Got {current_nsgm_sequence.shape[0]}, expected {self.look_back}. Appending NaN.")
-                nsgm_test_preds.append(np.nan)
-        nsgm_test_preds = np.array(nsgm_test_preds).flatten()
-        if np.isnan(nsgm_test_preds).any():
-            print(f"Warning: NaNs found in NSGM test predictions. Count: {np.isnan(nsgm_test_preds).sum()}")
-            temp_series = pd.Series(nsgm_test_preds)
-            temp_series.ffill(inplace=True)
-            temp_series.bfill(inplace=True)
-            nsgm_test_preds = temp_series.values
-
-
-        # 4. Train Ensemble (Weighted Fusion) Module
-        print("\nTraining Ensemble model weights...")
-        self.ensemble_model.train_weights(att_lstm_val_preds, nsgm_val_preds, y_val_seq)
-
-        # 5. Make Final Ensemble Predictions on Test Set
-        print("Making final Ensemble predictions on test set...")
-        ensemble_test_preds = self.ensemble_model.predict(att_lstm_test_preds, nsgm_test_preds)
-        # --- End of bypassed NSGM and Ensemble sections ---
+        # --- NSGM and Ensemble sections removed ---
 
         # Inverse transform predictions and actual values to original scale
+        # Only ATT-LSTM predictions are relevant now
         dummy_preds_lstm = np.zeros((len(att_lstm_test_preds), self.processed_df.shape[1]))
         dummy_preds_lstm[:, self.processed_df.columns.get_loc(target_column_name)] = att_lstm_test_preds
         original_att_lstm_test_preds = self.data_scaler.inverse_transform(dummy_preds_lstm)[:, self.processed_df.columns.get_loc(target_column_name)]
 
-        # Inverse transform NSGM predictions
-        dummy_preds_nsgm = np.zeros((len(nsgm_test_preds), self.processed_df.shape[1]))
-        dummy_preds_nsgm[:, self.processed_df.columns.get_loc(target_column_name)] = nsgm_test_preds
-        original_nsgm_test_preds = self.data_scaler.inverse_transform(dummy_preds_nsgm)[:, self.processed_df.columns.get_loc(target_column_name)]
-
-        # Inverse transform Ensemble predictions
-        dummy_preds_ensemble = np.zeros((len(ensemble_test_preds), self.processed_df.shape[1]))
-        dummy_preds_ensemble[:, self.processed_df.columns.get_loc(target_column_name)] = ensemble_test_preds
-        original_ensemble_test_preds = self.data_scaler.inverse_transform(dummy_preds_ensemble)[:, self.processed_df.columns.get_loc(target_column_name)]
-
+        # NSGM and Ensemble predictions are no longer generated or transformed
+        # original_nsgm_test_preds = None
+        # original_ensemble_test_preds = None
 
         dummy_actuals = np.zeros((len(y_test_seq), self.processed_df.shape[1]))
         dummy_actuals[:, self.processed_df.columns.get_loc(target_column_name)] = y_test_seq
@@ -210,23 +145,23 @@ class FullStockPredictionModel:
         # Evaluate performance
         print("\n--- Model Performance on Test Set (Original Scale) ---")
         
+        # ATT-LSTM Metrics
         mse_lstm = mean_squared_error(original_y_test_seq, original_att_lstm_test_preds)
         mae_lstm = mean_absolute_error(original_y_test_seq, original_att_lstm_test_preds)
         rmse_lstm = np.sqrt(mse_lstm)
+        mean_actuals_lstm = np.mean(original_y_test_seq)
+        if mean_actuals_lstm == 0: # Avoid division by zero
+            rmse_perc_mean_actuals_lstm = float('inf')
+        else:
+            rmse_perc_mean_actuals_lstm = (rmse_lstm / mean_actuals_lstm) * 100
         print(f"ATT-LSTM - MSE: {mse_lstm:.4f}, MAE: {mae_lstm:.4f}, RMSE: {rmse_lstm:.4f}")
+        print(f"ATT-LSTM - RMSE as % of Mean Actuals: {rmse_perc_mean_actuals_lstm:.2f}% (Target: <= 6%)")
 
-        # Bypassed NSGM and Ensemble metrics
-        mse_nsgm = mean_squared_error(original_y_test_seq, original_nsgm_test_preds)
-        mae_nsgm = mean_absolute_error(original_y_test_seq, original_nsgm_test_preds)
-        rmse_nsgm = np.sqrt(mse_nsgm)
-        print(f"NSGM(1,N) - MSE: {mse_nsgm:.4f}, MAE: {mae_nsgm:.4f}, RMSE: {rmse_nsgm:.4f}")
+        # NSGM Metrics (Removed)
+        # Ensemble Metrics (Removed)
 
-        mse_ensemble = mean_squared_error(original_y_test_seq, original_ensemble_test_preds)
-        mae_ensemble = mean_absolute_error(original_y_test_seq, original_ensemble_test_preds)
-        rmse_ensemble = np.sqrt(mse_ensemble)
-        print(f"Ensemble Model - MSE: {mse_ensemble:.4f}, MAE: {mae_ensemble:.4f}, RMSE: {rmse_ensemble:.4f}")
-        # print("NSGM and Ensemble models are currently bypassed for ATT-LSTM focus.")
-
+        # Store the percentage RMSE in the metrics dictionary as well for ATT-LSTM only
+        # The metrics dictionary is populated later in the code, so we'll add it there.
 
         # Create a directory for plots if it doesn't exist
         plots_dir = "." # Save to root directory for now
@@ -261,37 +196,8 @@ class FullStockPredictionModel:
                 os.path.join(plots_dir, "full_run_att_lstm_residuals_histogram.png")
             )
 
-            # NSGM Plots
-            self._plot_predictions_vs_actuals_timeseries(
-                test_indices, original_y_test_seq, original_nsgm_test_preds,
-                "NSGM(1,N) Model Predictions vs Actuals",
-                os.path.join(plots_dir, "full_run_nsgm_preds_vs_actuals_timeseries.png")
-            )
-
-            # Ensemble Plots
-            self._plot_predictions_vs_actuals_timeseries(
-                test_indices, original_y_test_seq, original_ensemble_test_preds,
-                "Ensemble Model Predictions vs Actuals",
-                os.path.join(plots_dir, "full_run_ensemble_preds_vs_actuals_timeseries.png")
-            )
-            # Scatter for Ensemble
-            self._plot_predictions_vs_actuals_scatter(
-                original_y_test_seq, original_ensemble_test_preds,
-                "Ensemble Model Predictions vs Actuals (Scatter)",
-                os.path.join(plots_dir, "full_run_ensemble_preds_vs_actuals_scatter.png")
-            )
-            # Residuals for Ensemble
-            residuals_ensemble = original_y_test_seq - original_ensemble_test_preds
-            self._plot_residuals_timeseries(
-                test_indices, residuals_ensemble,
-                "Ensemble Model Residuals Over Time",
-                os.path.join(plots_dir, "full_run_ensemble_residuals_timeseries.png")
-            )
-            self._plot_residuals_histogram(
-                residuals_ensemble,
-                "Ensemble Model Distribution of Residuals",
-                os.path.join(plots_dir, "full_run_ensemble_residuals_histogram.png")
-            )
+            # NSGM Plots (Removed)
+            # Ensemble Plots (Removed)
 
         except Exception as e:
             print(f"Error during plotting: {e}")
@@ -301,13 +207,12 @@ class FullStockPredictionModel:
 
         return {
             "att_lstm_preds": original_att_lstm_test_preds,
-            "nsgm_preds": original_nsgm_test_preds,
-            "ensemble_preds": original_ensemble_test_preds,
+            # "nsgm_preds": None, # Removed
+            # "ensemble_preds": None, # Removed
             "actual_values": original_y_test_seq,
             "metrics": {
-                "lstm_mse": mse_lstm, "lstm_mae": mae_lstm, "lstm_rmse": rmse_lstm,
-                "nsgm_mse": mse_nsgm, "nsgm_mae": mae_nsgm, "nsgm_rmse": rmse_nsgm,
-                "ensemble_mse": mse_ensemble, "ensemble_mae": mae_ensemble, "ensemble_rmse": rmse_ensemble
+                "lstm_mse": mse_lstm, "lstm_mae": mae_lstm, "lstm_rmse": rmse_lstm, "lstm_rmse_perc": rmse_perc_mean_actuals_lstm
+                # NSGM and Ensemble metrics removed
             }
         }
 
@@ -368,46 +273,94 @@ class FullStockPredictionModel:
 # Example Usage (Run the full model)
 if __name__ == '__main__':
     full_model = FullStockPredictionModel(
-        stock_ticker='^AEX',     # Using AEX index as requested
-        years_of_data=5,         # As requested
-        look_back=60,            # Using a common look_back period
-        lstm_units=100,          # Increased LSTM units
-        dense_units=50,          # Increased Dense units
-        lstm_learning_rate=0.001,# Default learning rate
-        ensemble_optimization_method='mse_optimization', # Ensure this is a valid option
+        stock_ticker='^AEX',    # Using AEX index
+        years_of_data=10,       # Using 10 years of data
+        look_back=60,           # Common look_back period
         random_seed=42
     )
 
     # Train with more epochs, relying on EarlyStopping in ATTLSTMModel
+    # Epochs and batch_size for the final training run after HPO.
+    # These could also be part of the tuned HPs.
     results = full_model.train_and_evaluate(
-        epochs=100, # Max epochs, EarlyStopping will likely trigger sooner.
-        batch_size=32 # Default batch size
+        epochs=150, # Increased epochs for final training
+        batch_size=32
     )
 
     if results: # Check if results were returned (not empty on error)
         print("\n--- Final Results ---")
-        if "ensemble_preds" in results and results["ensemble_preds"] is not None:
-             print("Final Ensemble Predictions (first 5):", results["ensemble_preds"][:5])
         if "att_lstm_preds" in results and results["att_lstm_preds"] is not None:
              print("Final ATT-LSTM Predictions (first 5):", results["att_lstm_preds"][:5])
-        if "nsgm_preds" in results and results["nsgm_preds"] is not None:
-             print("Final NSGM Predictions (first 5):", results["nsgm_preds"][:5])
+        # NSGM and Ensemble preds removed
 
         print("Actual Values (first 5):", results["actual_values"][:5])
 
         print("\nMetrics from the run:")
-        # Custom order for printing metrics
-        metric_order = ["lstm", "nsgm", "ensemble"]
-        for model_key in metric_order:
-            mse_key = f"{model_key}_mse"
-            if mse_key in results["metrics"]:
-                 print(f"  {model_key.upper()} Model:")
-                 print(f"    MSE:  {results['metrics'][f'{model_key}_mse']:.4f}")
-                 print(f"    MAE:  {results['metrics'][f'{model_key}_mae']:.4f}")
-                 print(f"    RMSE: {results['metrics'][f'{model_key}_rmse']:.4f}")
-            elif model_key == "nsgm" and "nsgm_mse" not in results["metrics"]: # Handle if NSGM was skipped due to error
-                print(f"  NSGM Model: Metrics not available (likely skipped or error during its phase).")
+        # Only LSTM metrics are now relevant
+        if "lstm_mse" in results["metrics"]:
+            print(f"  ATT-LSTM Model:")
+            print(f"    MSE:  {results['metrics']['lstm_mse']:.4f}")
+            print(f"    MAE:  {results['metrics']['lstm_mae']:.4f}")
+            print(f"    RMSE: {results['metrics']['lstm_rmse']:.4f}")
+            if "lstm_rmse_perc" in results["metrics"]:
+                print(f"    RMSE as % of Mean Actuals: {results['metrics']['lstm_rmse_perc']:.2f}%")
+        else:
+            print("  ATT-LSTM Model: Metrics not available.")
 
+        # --- Production Readiness Testing (Simulated) ---
+        if full_model.att_lstm_model and hasattr(full_model.att_lstm_model, 'model') and full_model.att_lstm_model.model is not None:
+            print("\n--- Production Readiness Testing (Prediction Speed) ---")
+
+            # Need X_test_seq from the train_and_evaluate scope, or re-generate a sample
+            # For simplicity, let's assume train_and_evaluate populates an X_test_seq that can be accessed
+            # or we retrieve it from the results if it was returned.
+            # However, train_and_evaluate doesn't return X_test_seq.
+            # So, we need to get a sample of X_test_seq.
+            # We can grab one from the `full_model` instance if it stores it, or re-create one.
+            # Let's assume `full_model.processed_df` and `full_model.look_back` are available.
+
+            if full_model.processed_df is not None and not full_model.processed_df.empty:
+                # Create a sample sequence for testing prediction speed
+                # This is a simplified way; ideally, use an actual X_test_seq sample
+                num_features = full_model.processed_df.shape[1]
+                sample_raw_data = np.random.rand(full_model.look_back, num_features) # Create dummy data matching shape
+
+                # For single instance prediction, the input needs to be (1, look_back, num_features)
+                single_instance_input = np.expand_dims(sample_raw_data, axis=0)
+
+                # Time single instance prediction
+                num_single_runs = 10
+                single_pred_times = []
+                for _ in range(num_single_runs):
+                    start_time = time.time()
+                    _ = full_model.att_lstm_model.predict(single_instance_input)
+                    end_time = time.time()
+                    single_pred_times.append(end_time - start_time)
+
+                avg_single_pred_time = np.mean(single_pred_times)
+                print(f"Average single instance prediction time: {avg_single_pred_time*1000:.2f} ms (over {num_single_runs} runs)")
+
+                # Time batch instance prediction
+                batch_size_test = 32
+                # Create a batch of dummy data: (batch_size_test, look_back, num_features)
+                batch_input = np.random.rand(batch_size_test, full_model.look_back, num_features)
+
+                num_batch_runs = 5
+                batch_pred_times = []
+                for _ in range(num_batch_runs):
+                    start_time = time.time()
+                    _ = full_model.att_lstm_model.predict(batch_input)
+                    end_time = time.time()
+                    batch_pred_times.append(end_time - start_time)
+
+                avg_batch_pred_time_total = np.mean(batch_pred_times)
+                avg_batch_pred_time_per_instance = avg_batch_pred_time_total / batch_size_test
+                print(f"Average batch ({batch_size_test} instances) prediction time: {avg_batch_pred_time_total*1000:.2f} ms (total)")
+                print(f"Average per-instance prediction time in batch: {avg_batch_pred_time_per_instance*1000:.2f} ms (over {num_batch_runs} runs)")
+            else:
+                print("Could not perform prediction speed test: processed_df not available.")
+        else:
+            print("ATT-LSTM model not available for production readiness testing.")
 
     else:
         print("Model training and evaluation did not complete successfully.")
