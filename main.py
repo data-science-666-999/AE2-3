@@ -34,6 +34,7 @@ class FullStockPredictionModel:
         self.processed_df = None
         self.selected_features = None # To store selected feature names
         self.df_all_indicators = None # To store dataframe with all indicators for volatility analysis
+        self.plots_dir_path = "performance_evaluation_report" # Added instance variable for plot directory
 
     def _create_sequences(self, data, target_column_name="Close"):
         # Ensure target_column_name is in data.columns
@@ -233,34 +234,39 @@ class FullStockPredictionModel:
             print("Could not perform volatility-specific performance analysis: ATR data not available in df_all_indicators.")
 
 
-        plots_dir = "."
-        print(f"Attempting to save plots to current directory: {os.path.abspath(plots_dir)}")
+        # Ensure the directory exists (using the instance variable)
+        os.makedirs(self.plots_dir_path, exist_ok=True)
+        print(f"Attempting to save plots to: {os.path.abspath(self.plots_dir_path)}")
 
         try:
             self._plot_predictions_vs_actuals_timeseries(
                 test_indices, original_y_test_seq, original_att_lstm_test_preds,
                 "ATT-LSTM Model Predictions vs Actuals",
-                os.path.join(plots_dir, "full_run_att_lstm_preds_vs_actuals_timeseries.png")
+                os.path.join(self.plots_dir_path, "full_run_att_lstm_preds_vs_actuals_timeseries.png")
             )
             self._plot_predictions_vs_actuals_scatter(
                 original_y_test_seq, original_att_lstm_test_preds,
                 "ATT-LSTM Model Predictions vs Actuals (Scatter)",
-                os.path.join(plots_dir, "full_run_att_lstm_preds_vs_actuals_scatter.png")
+                os.path.join(self.plots_dir_path, "full_run_att_lstm_preds_vs_actuals_scatter.png")
             )
             self._plot_residuals_timeseries(
                 test_indices, residuals_lstm,
                 "ATT-LSTM Model Residuals Over Time",
-                os.path.join(plots_dir, "full_run_att_lstm_residuals_timeseries.png")
+                os.path.join(self.plots_dir_path, "full_run_att_lstm_residuals_timeseries.png")
             )
             self._plot_residuals_histogram(
                 residuals_lstm,
                 "ATT-LSTM Model Distribution of Residuals",
-                os.path.join(plots_dir, "full_run_att_lstm_residuals_histogram.png")
+                os.path.join(self.plots_dir_path, "full_run_att_lstm_residuals_histogram.png")
             )
+            # Call the new volatility performance plot
+            if metrics_log: # Ensure metrics_log is available
+                self._plot_volatility_performance_comparison(metrics_log)
+
         except Exception as e:
             print(f"Error during plotting: {e}")
 
-        print(f"\nVisualizations saved to '{plots_dir}' directory.")
+        print(f"\nVisualizations saved to '{self.plots_dir_path}' directory.")
         print("\n--- Full Model Training and Evaluation Complete ---")
 
         # Return all collected metrics along with predictions and actuals
@@ -269,6 +275,44 @@ class FullStockPredictionModel:
             "actual_values": original_y_test_seq,
             "metrics": metrics_log # Return the comprehensive metrics dictionary
         }
+
+    def _plot_volatility_performance_comparison(self, metrics_log, base_filename="volatility_performance_comparison.png"):
+        """Plots a bar chart comparing performance metrics across volatility periods."""
+        periods = ["low_vol", "mid_vol", "high_vol"]
+        metrics_to_plot = ["rmse", "mae"] # Can extend to other metrics like mse
+
+        for metric_name in metrics_to_plot:
+            values = []
+            labels = []
+            valid_periods_for_metric = 0
+            for period in periods:
+                key = f"{period}_{metric_name}"
+                if key in metrics_log and not np.isnan(metrics_log[key]):
+                    values.append(metrics_log[key])
+                    labels.append(period.replace("_", " ").title())
+                    valid_periods_for_metric +=1
+
+            if valid_periods_for_metric < 1: # No data for any period for this metric
+                print(f"Skipping {metric_name.upper()} volatility comparison plot: No valid data.")
+                continue
+
+            plt.figure(figsize=(10, 6))
+            bars = plt.bar(labels, values, color=['skyblue', 'lightgreen', 'salmon'])
+            plt.ylabel(metric_name.upper())
+            plt.title(f"Model Performance ({metric_name.upper()}) by Volatility Period")
+            plt.grid(axis='y', linestyle='--')
+
+            # Add text labels on bars
+            for bar in bars:
+                yval = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width()/2.0, yval + 0.01 * max(values, default=0), f'{yval:.2f}', ha='center', va='bottom')
+
+            filename = os.path.join(self.plots_dir_path, f"{metric_name}_" + base_filename) # self.plots_dir_path needs to be set
+            plt.tight_layout()
+            plt.savefig(filename)
+            plt.close()
+            print(f"Volatility performance comparison plot ({metric_name}) saved to {filename}")
+
 
     # --- Plotting Helper Methods ---
     def _plot_predictions_vs_actuals_timeseries(self, x_values, actuals, predictions, title, filename):
@@ -328,7 +372,7 @@ class FullStockPredictionModel:
 if __name__ == '__main__':
     # --- Configurable parameters for a single test run ---
     test_stock_ticker = '^AEX'
-    test_years_of_data = 3    # Changed to 3 years
+    test_years_of_data = 10   # Changed to 10 years for extended testing
     test_look_back = 60
     test_lasso_alpha = 0.005  # Using a default alpha for this run
     test_epochs = 150
