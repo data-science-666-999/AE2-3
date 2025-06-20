@@ -6,6 +6,8 @@ from sklearn.linear_model import Lasso
 import yfinance as yf
 from datetime import datetime, timedelta
 import ta
+import matplotlib.pyplot as plt
+import os
 
 # --- Module 1: Data Acquisition and Preprocessing ---
 
@@ -173,7 +175,7 @@ class DataPreprocessor:
         # Construct the final DataFrame for scaling
         final_df_for_scaling = df_cleaned[selected_feature_names + [target_column]]
 
-        return final_df_for_scaling, selected_feature_names
+        return final_df_for_scaling, selected_feature_names, lasso # Return LASSO model
 
     def preprocess(self):
         stock_data = self._download_yfinance_data()
@@ -182,7 +184,9 @@ class DataPreprocessor:
         # For LASSO, we'll predict 'Close' based on other features.
         # The target 'Close' should be present in stock_data before this step.
         # Make a copy to avoid SettingWithCopyWarning if stock_data is a slice
-        processed_data_for_scaling, selected_features = self._apply_lasso_feature_selection(stock_data.copy(), target_column='Close')
+        # Store the lasso model returned by _apply_lasso_feature_selection
+        processed_data_for_scaling, selected_features, lasso_model = self._apply_lasso_feature_selection(stock_data.copy(), target_column='Close')
+        self.lasso_model = lasso_model # Store for access in main block
 
         if processed_data_for_scaling.empty:
             print("Preprocessing failed: No data after feature selection.")
@@ -209,34 +213,95 @@ class DataPreprocessor:
 
 # Example Usage (for testing the module)
 if __name__ == '__main__':
-    # Test with AEL for 1 year for faster local testing
-    preprocessor = DataPreprocessor(stock_ticker='AEL', years_of_data=1)
+    # Test with AAPL for 1 year for faster local testing
+    preprocessor = DataPreprocessor(stock_ticker='AAPL', years_of_data=1)
+    original_target_column = 'Close' # yfinance specific target before potential flattening
     try:
         processed_df, data_scaler = preprocessor.preprocess()
 
         if not processed_df.empty:
-            print("\nProcessed Data Head:")
+            print("\n--- DataPreprocessor Module Test Results ---")
+            print("\n1. Processed Data Head:")
             print(processed_df.head())
-            print("\nProcessed Data Info:")
+            print("\n2. Processed Data Info:")
             processed_df.info()
-            print("\nShape of processed data:", processed_df.shape)
-            print("\nNaN check in final processed data (sum):")
+            print("\n3. Shape of processed data:", processed_df.shape)
+
+            print("\n4. Descriptive Statistics of Processed Data:")
+            print(processed_df.describe())
+
+            print("\n5. NaN check in final processed data (sum):")
             print(processed_df.isnull().sum())
 
-            if data_scaler and 'Close' in processed_df.columns:
-                # Example of inverse transformation
-                if len(processed_df) > 0:
-                    dummy_row = processed_df.iloc[[0]].copy() # Take first row of scaled data
-                    # Assume 'Close' is one of the columns. Find its index.
-                    close_col_idx = processed_df.columns.get_loc('Close')
-                    example_scaled_close = dummy_row.iloc[0, close_col_idx]
+            # LASSO feature selection details
+            if hasattr(preprocessor, 'lasso_model') and preprocessor.lasso_model:
+                print("\n6. LASSO Feature Selection Details:")
+                # The actual features used for LASSO (excluding the target)
+                # are the columns of processed_df minus the last one (which is the target)
+                lasso_feature_names = processed_df.columns[:-1].tolist()
 
-                    # To inverse transform, we need the full row with all features present during fit
-                    original_row_values = data_scaler.inverse_transform(dummy_row)
-                    original_close = original_row_values[0, close_col_idx]
-                    print(f"\nExample: Scaled Close {example_scaled_close:.4f} from first row inverse transforms to: {original_close:.4f}")
+                # Verify target column name after potential flattening in _apply_lasso_feature_selection
+                # The last column of processed_df is the target.
+                actual_target_column_name = processed_df.columns[-1]
+                print(f"   Target column for LASSO (determined dynamically): {actual_target_column_name}")
+
+                selected_coeffs = preprocessor.lasso_model.coef_
+
+                # Filter out zero coefficients for selected features display
+                # Note: lasso_feature_names are from the *scaled* data fed to LASSO,
+                # which should align with processed_df.columns[:-1]
+
+                actual_selected_features = []
+                actual_selected_coeffs = []
+                print(f"   Number of features input to LASSO (excluding target): {len(lasso_feature_names)}")
+                print(f"   Number of coefficients from LASSO: {len(selected_coeffs)}")
+
+                # Reconstruct the feature list that LASSO actually saw (before it selected from them)
+                # This needs to be done carefully if yfinance ticker was part of column names
+                # For AEL, it becomes Close_AEL, High_AEL etc.
+                # The _apply_lasso_feature_selection method handles this flattening.
+                # features_df.columns within that method holds the correct names.
+                # For now, let's assume lasso_feature_names is correct.
+
+                # The features that LASSO selected are those with non-zero coefficients.
+                # The `selected_feature_names` variable from `_apply_lasso_feature_selection`
+                # already holds this, which are the columns of `processed_df[:-1]`
+                print(f"   Selected features by LASSO (non-zero coefficients): {lasso_feature_names}")
+
+                if lasso_feature_names: # Check if there are features to plot
+                    plt.figure(figsize=(12, 8))
+                    plt.bar(lasso_feature_names, selected_coeffs[:len(lasso_feature_names)]) # Ensure we only plot for available names
+                    plt.xlabel("Features")
+                    plt.ylabel("LASSO Coefficient Value")
+                    plt.title("LASSO Feature Coefficients")
+                    plt.xticks(rotation=90)
+                    plt.tight_layout()
+                    plot_filename = "lasso_feature_coefficients.png"
+                    plt.savefig(plot_filename)
+                    print(f"\n   LASSO coefficients plot saved as {plot_filename} in {os.path.abspath('.')}")
+                    plt.close()
                 else:
-                    print("\nCannot demonstrate inverse transform: processed_df is empty.")
+                    print("   No features selected by LASSO to plot.")
+
+            else:
+                print("\n6. LASSO Model not available or no features selected.")
+
+
+            if data_scaler and actual_target_column_name in processed_df.columns:
+                print(f"\n7. Example of Inverse Transformation (Target: {actual_target_column_name}):")
+                if len(processed_df) > 0:
+                    dummy_row = processed_df.iloc[[0]].copy()
+                    target_col_idx_in_processed_df = processed_df.columns.get_loc(actual_target_column_name)
+                    example_scaled_target = dummy_row.iloc[0, target_col_idx_in_processed_df]
+
+                    original_row_values = data_scaler.inverse_transform(dummy_row)
+                    original_target = original_row_values[0, target_col_idx_in_processed_df]
+                    print(f"   Scaled Target '{actual_target_column_name}' {example_scaled_target:.4f} from first row inverse transforms to: {original_target:.4f}")
+                else:
+                    print("   Cannot demonstrate inverse transform: processed_df is empty.")
+            else:
+                print(f"\n7. Cannot demonstrate inverse transform: Scaler or target column '{actual_target_column_name}' missing.")
+            print("\n--- End of DataPreprocessor Module Test ---")
         else:
             print("Preprocessing returned an empty DataFrame. Cannot display details.")
 

@@ -1,5 +1,11 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import os
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+# Import DataPreprocessor from the sibling module
+from data_preprocessing_module import DataPreprocessor
 
 # --- Module 3: Cyclic Multidimensional Gray Model (NSGM(1,N)) Module ---
 
@@ -112,40 +118,129 @@ class NSGM1NModel:
 
 # Example Usage (for testing the module)
 if __name__ == '__main__':
-    # Simulate some preprocessed data (replace with actual preprocessed_df from Module 1)
-    # For demonstration, let's assume preprocessed_df has 6 features (including 'Close')
-    # and a shape like (n_samples, n_features)
-    n_samples = 1000
-    n_features = 6 # e.g., Close, High, Low, SMA_30, EMA_10, RSI (Close is primary)
-    # Simulate scaled data between 0 and 1
-    simulated_data = np.random.rand(n_samples, n_features)
-    simulated_df = pd.DataFrame(simulated_data, columns=['Close'] + [f'feature_{i}' for i in range(n_features-1)])
+    print("\n--- NSGM1NModel Module Test ---")
 
-    # Assuming 'Close' is the target column and is the first column (index 0)
-    target_column_index = 0
+    # 1. Get preprocessed data
+    # Using AAPL for 2 years of data.
+    data_preprocessor = DataPreprocessor(stock_ticker='AAPL', years_of_data=2, random_seed=42)
+    processed_df, data_scaler = data_preprocessor.preprocess()
 
-    look_back = 60
-
-    # Split data for training NSGM(1,N) parameters
-    train_size = int(len(simulated_df) * 0.8)
-    train_data = simulated_df.iloc[:train_size].values
-    test_data = simulated_df.iloc[train_size:].values
-
-    # For NSGM(1,N) training, X_train is all features except the target, y_train is the target.
-    # But the model expects the primary series as the first column of combined data.
-    nsgm_X_train = train_data[:, 1:] # Related series
-    nsgm_y_train = train_data[:, 0]  # Primary series
-
-    nsgm_model = NSGM1NModel()
-    nsgm_model.train(nsgm_X_train, nsgm_y_train)
-
-    # Test prediction with a sequence (last 'look_back' steps of test_data)
-    if len(test_data) >= look_back + 1: # Need look_back steps for input and 1 for actual next value
-        test_sequence = test_data[0:look_back, :]
-        predicted_val = nsgm_model.predict(test_sequence)
-        print(f"\nNSGM(1,N) Predicted Value: {predicted_val}")
-        print(f"Actual Value (next step): {test_data[look_back, 0]}")
+    if processed_df is None or processed_df.empty:
+        print("Failed to preprocess data. Aborting NSGM1NModel test.")
     else:
-        print("Not enough test data to create a sequence for prediction.")
+        print(f"Shape of preprocessed_df: {processed_df.shape}")
+
+        # NSGM(1,N) expects the primary series (target) as the first column for its internal logic.
+        # The DataPreprocessor currently puts the target ('Close_ticker') as the last column.
+        # We need to reorder processed_df for NSGM.
+        target_column_name = processed_df.columns[-1] # e.g., 'Close_AAPL'
+
+        # Create a new DataFrame with target as the first column
+        cols = [target_column_name] + [col for col in processed_df.columns if col != target_column_name]
+        nsgm_input_df = processed_df[cols]
+        print(f"Reordered columns for NSGM input (target '{target_column_name}' is first): {nsgm_input_df.columns.tolist()}")
+
+        # Split data: 80% for training, 20% for testing NSGM predictions step-by-step
+        # NSGM is typically trained on a contiguous block of historical data.
+        train_size = int(len(nsgm_input_df) * 0.8)
+        train_df_nsgm = nsgm_input_df.iloc[:train_size]
+        test_df_nsgm = nsgm_input_df.iloc[train_size:]
+
+        print(f"train_df_nsgm shape: {train_df_nsgm.shape}")
+        print(f"test_df_nsgm shape: {test_df_nsgm.shape}")
+
+        if train_df_nsgm.shape[0] < 2 or test_df_nsgm.shape[0] == 0 : # NSGM needs at least 2 samples for training.
+            print("Not enough data for NSGM training/testing after split. Aborting.")
+        else:
+            # Prepare data for NSGM training:
+            # y_train is the primary series (first column of train_df_nsgm)
+            # X_train are the related series (other columns of train_df_nsgm)
+            nsgm_y_train = train_df_nsgm.iloc[:, 0].values
+            nsgm_X_train = train_df_nsgm.iloc[:, 1:].values
+
+            nsgm_model = NSGM1NModel()
+            print("\nTraining NSGM(1,N) model...")
+            nsgm_model.train(nsgm_X_train, nsgm_y_train)
+
+            if nsgm_model.model_params is None:
+                print("NSGM model training failed (model_params is None). Aborting further tests.")
+            else:
+                print(f"NSGM model trained. Parameters: {nsgm_model.model_params}")
+
+                # Test prediction step-by-step on the test_df_nsgm
+                # For NSGM, prediction is typically one step ahead using a rolling window of historical data.
+                # The `predict` method expects a sequence of `look_back` length.
+                # For this test, we'll use a fixed look_back similar to LSTM, e.g., 60.
+                # However, NSGM's `predict` method itself takes the *current* sequence leading up to prediction point.
+                # The training data for NSGM parameters is train_df_nsgm.
+                # To predict for test_df_nsgm, we need to provide sequences from nsgm_input_df.
+
+                look_back_nsgm = 60 # A window size for prediction inputs
+                nsgm_predictions_scaled = []
+                nsgm_actuals_scaled = []
+
+                print(f"\nMaking step-by-step predictions on test data (look_back={look_back_nsgm})...")
+                # We need to ensure that for each prediction point in test_df_nsgm,
+                # we can form a sequence of `look_back_nsgm` points ending just before it.
+                # The input to nsgm_model.predict should be from nsgm_input_df (which has target as first col).
+
+                # Start predicting from the first point in test_df_nsgm.
+                # The sequence for the first test point comes from data ending at train_size -1.
+                for i in range(len(test_df_nsgm)):
+                    # Index in the original nsgm_input_df for the end of the current sequence
+                    current_sequence_end_idx = train_size + i -1
+                    # Index for the start of the sequence
+                    current_sequence_start_idx = current_sequence_end_idx - look_back_nsgm + 1
+
+                    if current_sequence_start_idx < 0:
+                        # print(f"Skipping prediction for test point {i} due to insufficient history for look_back.")
+                        continue
+
+                    test_sequence = nsgm_input_df.iloc[current_sequence_start_idx : current_sequence_end_idx + 1].values
+
+                    if test_sequence.shape[0] < look_back_nsgm:
+                        # This case should ideally be caught by current_sequence_start_idx < 0,
+                        # but as a safeguard if data has gaps.
+                        # print(f"Skipping prediction for test point {i}, sequence length {test_sequence.shape[0]} is less than look_back {look_back_nsgm}.")
+                        continue
+
+                    predicted_val = nsgm_model.predict(test_sequence)
+                    actual_val = test_df_nsgm.iloc[i, 0] # Actual value is the first column (target) of current test point
+
+                    nsgm_predictions_scaled.append(predicted_val)
+                    nsgm_actuals_scaled.append(actual_val)
+
+                if not nsgm_predictions_scaled:
+                    print("No predictions were made by NSGM model. Check data length and look_back setting.")
+                else:
+                    nsgm_predictions_scaled = np.array(nsgm_predictions_scaled)
+                    nsgm_actuals_scaled = np.array(nsgm_actuals_scaled)
+
+                    mse_nsgm_scaled = mean_squared_error(nsgm_actuals_scaled, nsgm_predictions_scaled)
+                    mae_nsgm_scaled = mean_absolute_error(nsgm_actuals_scaled, nsgm_predictions_scaled)
+                    rmse_nsgm_scaled = np.sqrt(mse_nsgm_scaled)
+
+                    print("\n--- NSGM(1,N) Model Performance (Scaled Data on Test Set) ---")
+                    print(f"Test MSE (scaled): {mse_nsgm_scaled:.6f}")
+                    print(f"Test MAE (scaled): {mae_nsgm_scaled:.6f}")
+                    print(f"Test RMSE (scaled): {rmse_nsgm_scaled:.6f}")
+                    print(f"Number of test predictions made: {len(nsgm_predictions_scaled)}")
+
+                    # Visualization
+                    plt.figure(figsize=(12, 6))
+                    sample_size_nsgm = min(100, len(nsgm_actuals_scaled)) # Plot up to 100 points
+                    plt.plot(nsgm_actuals_scaled[:sample_size_nsgm], label='Actual Values (Scaled)', marker='.')
+                    plt.plot(nsgm_predictions_scaled[:sample_size_nsgm], label='NSGM Predicted Values (Scaled)', linestyle='--')
+                    plt.title(f'NSGM(1,N) Predictions vs Actuals (First {sample_size_nsgm} Test Samples - Scaled)')
+                    plt.xlabel('Sample Index in Test Set')
+                    plt.ylabel('Value (Scaled)')
+                    plt.legend()
+                    plt.grid(True)
+                    nsgm_plot_filename = "nsgm_module_preds_vs_actuals.png"
+                    plt.savefig(nsgm_plot_filename)
+                    print(f"NSGM predictions vs actuals plot saved as {nsgm_plot_filename} in {os.path.abspath('.')}")
+                    plt.close()
+
+    print("\n--- End of NSGM1NModel Module Test ---")
 
 
