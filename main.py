@@ -15,25 +15,25 @@ import time # Import time module for performance testing
 # --- Module 5: Integrate and Test the Full Model ---
 
 class FullStockPredictionModel:
-    def __init__(self, stock_ticker="AEL", years_of_data=10, look_back=60, random_seed=42): # Simplified constructor
+    def __init__(self, stock_ticker="AEL", years_of_data=10, look_back=60, random_seed=42, lasso_alpha=0.005): # Added lasso_alpha
         self.stock_ticker = stock_ticker
         self.years_of_data = years_of_data
         self.look_back = look_back
-        # self.lstm_units, self.dense_units, self.lstm_learning_rate are no longer needed here
-        # as ATTLSTMModel will be configured by model_params (hypothetical HPs)
-        # self.ensemble_optimization_method = ensemble_optimization_method # Removed
         self.random_seed = random_seed
+        self.lasso_alpha = lasso_alpha # Store lasso_alpha
 
         self.data_preprocessor = DataPreprocessor(
             stock_ticker=self.stock_ticker,
             years_of_data=self.years_of_data,
-            random_seed=self.random_seed
+            random_seed=self.random_seed,
+            lasso_alpha=self.lasso_alpha # Pass to DataPreprocessor
         )
         self.att_lstm_model = None
-        # self.nsgm_model = NSGM1NModel() # Removed
         # self.ensemble_model = EnsembleModel(...) # Removed
         self.data_scaler = None
         self.processed_df = None
+        self.selected_features = None # To store selected feature names
+        self.df_all_indicators = None # To store dataframe with all indicators for volatility analysis
 
     def _create_sequences(self, data, target_column_name="Close"):
         # Ensure target_column_name is in data.columns
@@ -50,25 +50,33 @@ class FullStockPredictionModel:
 
     def train_and_evaluate(self, epochs=50, batch_size=32, test_size=0.2, val_size=0.25):
         print("\n--- Starting Full Model Training and Evaluation ---")
+        metrics_log = {} # To store all metrics
 
         # 1. Data Acquisition and Preprocessing
-        self.processed_df, self.data_scaler = self.data_preprocessor.preprocess()
+        print("Starting Data Preprocessing...")
+        preprocessing_start_time = time.time()
+        # Update to receive all return values from preprocess
+        self.processed_df, self.data_scaler, self.selected_features, self.df_all_indicators = \
+            self.data_preprocessor.preprocess()
+        preprocessing_end_time = time.time()
+        metrics_log['preprocessing_time_seconds'] = preprocessing_end_time - preprocessing_start_time
+        print(f"Data Preprocessing completed in {metrics_log['preprocessing_time_seconds']:.2f} seconds.")
+        print(f"Selected features by LASSO: {self.selected_features}")
+        metrics_log['selected_features_count'] = len(self.selected_features)
+        metrics_log['selected_features_names'] = self.selected_features
+
+
         if self.processed_df.empty:
             print("Error: Preprocessed data is empty. Aborting training.")
-            return
+            return None # Return None to indicate failure
 
-        # Determine target column name dynamically (it's the last column from DataPreprocessor)
-        if self.processed_df.empty:
-            print("Error: Preprocessed data is empty. Cannot determine target column. Aborting training.")
-            return
+        target_column_name = self.processed_df.columns[-1] # Target is the last column
+        print(f"Dynamically determined target column name for model: {target_column_name}")
 
-        target_column_name = self.processed_df.columns[-1]
-        print(f"Dynamically determined target column name: {target_column_name}")
-
-        # Create sequences for LSTM and NSGM (if NSGM uses sequences)
-        # For NSGM, we need the original data for training, not sequences.
-        # For LSTM, we need sequences.
         X_seq, y_seq = self._create_sequences(self.processed_df, target_column_name=target_column_name)
+        if len(X_seq) == 0:
+            print("Error: No sequences created from processed data. Aborting.")
+            return None
 
         # Split data into training, validation, and test sets
         # Ensure temporal split for time series data
@@ -122,24 +130,33 @@ class FullStockPredictionModel:
         self.att_lstm_model.build_model()
 
         # Train the model
-        # Note: epochs and batch_size for this final training could also be part of HPs,
-        # but for now, we use the ones passed to train_and_evaluate.
-        self.att_lstm_model.train(X_train_seq, y_train_seq, X_val_seq, y_val_seq, epochs=epochs, batch_size=batch_size)
+        print("Starting ATT-LSTM Model Training...")
+        model_training_start_time = time.time()
+        history = self.att_lstm_model.train(
+            X_train_seq, y_train_seq, X_val_seq, y_val_seq,
+            epochs=epochs, batch_size=batch_size
+        )
+        model_training_end_time = time.time()
+        metrics_log['model_training_time_seconds'] = model_training_end_time - model_training_start_time
+        print(f"ATT-LSTM Model Training completed in {metrics_log['model_training_time_seconds']:.2f} seconds.")
+        if history and 'val_loss' in history.history:
+            metrics_log['final_val_loss'] = history.history['val_loss'][-1]
+            metrics_log['best_val_loss'] = min(history.history['val_loss'])
+            metrics_log['epochs_trained'] = len(history.history['val_loss'])
+
 
         # Predict on test set for LSTM
-        att_lstm_test_preds = self.att_lstm_model.predict(X_test_seq).flatten()
-
-        # --- NSGM and Ensemble sections removed ---
+        print("Starting predictions on test set...")
+        prediction_start_time = time.time()
+        att_lstm_test_preds_scaled = self.att_lstm_model.predict(X_test_seq).flatten()
+        prediction_end_time = time.time()
+        metrics_log['test_set_prediction_time_seconds'] = prediction_end_time - prediction_start_time
+        print(f"Test set prediction completed in {metrics_log['test_set_prediction_time_seconds']:.2f} seconds.")
 
         # Inverse transform predictions and actual values to original scale
-        # Only ATT-LSTM predictions are relevant now
-        dummy_preds_lstm = np.zeros((len(att_lstm_test_preds), self.processed_df.shape[1]))
-        dummy_preds_lstm[:, self.processed_df.columns.get_loc(target_column_name)] = att_lstm_test_preds
+        dummy_preds_lstm = np.zeros((len(att_lstm_test_preds_scaled), self.processed_df.shape[1]))
+        dummy_preds_lstm[:, self.processed_df.columns.get_loc(target_column_name)] = att_lstm_test_preds_scaled
         original_att_lstm_test_preds = self.data_scaler.inverse_transform(dummy_preds_lstm)[:, self.processed_df.columns.get_loc(target_column_name)]
-
-        # NSGM and Ensemble predictions are no longer generated or transformed
-        # original_nsgm_test_preds = None
-        # original_ensemble_test_preds = None
 
         dummy_actuals = np.zeros((len(y_test_seq), self.processed_df.shape[1]))
         dummy_actuals[:, self.processed_df.columns.get_loc(target_column_name)] = y_test_seq
@@ -147,36 +164,79 @@ class FullStockPredictionModel:
 
         # Evaluate performance
         print("\n--- Model Performance on Test Set (Original Scale) ---")
+        residuals_lstm = original_y_test_seq - original_att_lstm_test_preds
+
+        # Overall Metrics
+        metrics_log["overall_mse"] = mean_squared_error(original_y_test_seq, original_att_lstm_test_preds)
+        metrics_log["overall_mae"] = mean_absolute_error(original_y_test_seq, original_att_lstm_test_preds)
+        metrics_log["overall_rmse"] = np.sqrt(metrics_log["overall_mse"])
         
-        # ATT-LSTM Metrics
-        mse_lstm = mean_squared_error(original_y_test_seq, original_att_lstm_test_preds)
-        mae_lstm = mean_absolute_error(original_y_test_seq, original_att_lstm_test_preds)
-        rmse_lstm = np.sqrt(mse_lstm)
-        mean_actuals_lstm = np.mean(original_y_test_seq)
-        if mean_actuals_lstm == 0: # Avoid division by zero
-            rmse_perc_mean_actuals_lstm = float('inf')
+        mean_actuals = np.mean(original_y_test_seq)
+        if mean_actuals == 0:
+            metrics_log["overall_rmse_perc_mean"] = float('inf')
+            metrics_log["overall_mape"] = float('inf') # Mean Absolute Percentage Error
         else:
-            rmse_perc_mean_actuals_lstm = (rmse_lstm / mean_actuals_lstm) * 100
-        print(f"ATT-LSTM - MSE: {mse_lstm:.4f}, MAE: {mae_lstm:.4f}, RMSE: {rmse_lstm:.4f}")
-        print(f"ATT-LSTM - RMSE as % of Mean Actuals: {rmse_perc_mean_actuals_lstm:.2f}% (Target: <= 6%)")
+            metrics_log["overall_rmse_perc_mean"] = (metrics_log["overall_rmse"] / mean_actuals) * 100
+            metrics_log["overall_mape"] = np.mean(np.abs(residuals_lstm / original_y_test_seq)) * 100
 
-        # NSGM Metrics (Removed)
-        # Ensemble Metrics (Removed)
+        # Bias Metrics
+        metrics_log["bias_me"] = np.mean(residuals_lstm) # Mean Error
+        if mean_actuals == 0:
+            metrics_log["bias_mpe"] = float('inf') # Mean Percentage Error
+        else:
+            metrics_log["bias_mpe"] = np.mean(residuals_lstm / original_y_test_seq) * 100
 
-        # Store the percentage RMSE in the metrics dictionary as well for ATT-LSTM only
-        # The metrics dictionary is populated later in the code, so we'll add it there.
+        print(f"ATT-LSTM - Overall MSE: {metrics_log['overall_mse']:.4f}, MAE: {metrics_log['overall_mae']:.4f}, RMSE: {metrics_log['overall_rmse']:.4f}")
+        print(f"ATT-LSTM - Overall RMSE as % of Mean Actuals: {metrics_log['overall_rmse_perc_mean']:.2f}%")
+        print(f"ATT-LSTM - Overall MAPE: {metrics_log['overall_mape']:.2f}%")
+        print(f"ATT-LSTM - Bias (Mean Error): {metrics_log['bias_me']:.4f}")
+        print(f"ATT-LSTM - Bias (Mean Percentage Error): {metrics_log['bias_mpe']:.2f}%")
 
-        # Create a directory for plots if it doesn't exist
-        plots_dir = "." # Save to root directory for now
-        # os.makedirs(plots_dir, exist_ok=True) # Not needed for root
+        # Volatility-Specific Performance
+        # Ensure self.df_all_indicators and 'ATR' column exist and are properly aligned with test_indices
+        test_indices = self.processed_df.index[-len(original_y_test_seq):] # Get indices for the test set from processed_df
+
+        if self.df_all_indicators is not None and 'ATR' in self.df_all_indicators.columns:
+            # Align ATR data with the test set
+            atr_series_full = self.df_all_indicators['ATR']
+            # Ensure test_indices from processed_df (which is scaled and feature selected) can map back to df_all_indicators
+            # This assumes that df_all_indicators (NaN dropped) still covers the range of processed_df
+            if not test_indices.isin(atr_series_full.index).all():
+                print("Warning: Some test_indices not found in df_all_indicators. Volatility analysis might be incomplete.")
+                # Attempt to reindex, filling missing ATRs if any (not ideal, but a fallback)
+                aligned_atr = atr_series_full.reindex(test_indices).fillna(method='ffill').fillna(method='bfill')
+            else:
+                aligned_atr = atr_series_full.loc[test_indices]
+
+            if not aligned_atr.empty and len(aligned_atr) == len(original_y_test_seq):
+                low_vol_threshold = aligned_atr.quantile(0.25)
+                high_vol_threshold = aligned_atr.quantile(0.75)
+
+                low_vol_mask = aligned_atr <= low_vol_threshold
+                high_vol_mask = aligned_atr >= high_vol_threshold
+                mid_vol_mask = (~low_vol_mask) & (~high_vol_mask)
+
+                for period_name, mask in zip(["low_vol", "mid_vol", "high_vol"], [low_vol_mask, mid_vol_mask, high_vol_mask]):
+                    if np.sum(mask) > 0:
+                        metrics_log[f"{period_name}_mse"] = mean_squared_error(original_y_test_seq[mask], original_att_lstm_test_preds[mask])
+                        metrics_log[f"{period_name}_mae"] = mean_absolute_error(original_y_test_seq[mask], original_att_lstm_test_preds[mask])
+                        metrics_log[f"{period_name}_rmse"] = np.sqrt(metrics_log[f"{period_name}_mse"])
+                        print(f"ATT-LSTM - {period_name.replace('_', ' ').title()} - MSE: {metrics_log[f'{period_name}_mse']:.4f}, MAE: {metrics_log[f'{period_name}_mae']:.4f}, RMSE: {metrics_log[f'{period_name}_rmse']:.4f} (Samples: {np.sum(mask)})")
+                    else:
+                        print(f"ATT-LSTM - No samples for {period_name.replace('_', ' ').title()} period.")
+                        metrics_log[f"{period_name}_mse"] = np.nan
+                        metrics_log[f"{period_name}_mae"] = np.nan
+                        metrics_log[f"{period_name}_rmse"] = np.nan
+            else:
+                print("Could not perform volatility-specific performance analysis: ATR data alignment issue or insufficient data.")
+        else:
+            print("Could not perform volatility-specific performance analysis: ATR data not available in df_all_indicators.")
+
+
+        plots_dir = "."
         print(f"Attempting to save plots to current directory: {os.path.abspath(plots_dir)}")
 
-
-        # Generate and save plots (primarily for ATT-LSTM now)
-        test_indices = self.processed_df.index[-len(original_y_test_seq):]
-
         try:
-            # ATT-LSTM Plots
             self._plot_predictions_vs_actuals_timeseries(
                 test_indices, original_y_test_seq, original_att_lstm_test_preds,
                 "ATT-LSTM Model Predictions vs Actuals",
@@ -187,7 +247,6 @@ class FullStockPredictionModel:
                 "ATT-LSTM Model Predictions vs Actuals (Scatter)",
                 os.path.join(plots_dir, "full_run_att_lstm_preds_vs_actuals_scatter.png")
             )
-            residuals_lstm = original_y_test_seq - original_att_lstm_test_preds
             self._plot_residuals_timeseries(
                 test_indices, residuals_lstm,
                 "ATT-LSTM Model Residuals Over Time",
@@ -198,25 +257,17 @@ class FullStockPredictionModel:
                 "ATT-LSTM Model Distribution of Residuals",
                 os.path.join(plots_dir, "full_run_att_lstm_residuals_histogram.png")
             )
-
-            # NSGM Plots (Removed)
-            # Ensemble Plots (Removed)
-
         except Exception as e:
             print(f"Error during plotting: {e}")
 
         print(f"\nVisualizations saved to '{plots_dir}' directory.")
         print("\n--- Full Model Training and Evaluation Complete ---")
 
+        # Return all collected metrics along with predictions and actuals
         return {
             "att_lstm_preds": original_att_lstm_test_preds,
-            # "nsgm_preds": None, # Removed
-            # "ensemble_preds": None, # Removed
             "actual_values": original_y_test_seq,
-            "metrics": {
-                "lstm_mse": mse_lstm, "lstm_mae": mae_lstm, "lstm_rmse": rmse_lstm, "lstm_rmse_perc": rmse_perc_mean_actuals_lstm
-                # NSGM and Ensemble metrics removed
-            }
+            "metrics": metrics_log # Return the comprehensive metrics dictionary
         }
 
     # --- Plotting Helper Methods ---
@@ -275,14 +326,69 @@ class FullStockPredictionModel:
 
 # Example Usage (Run the full model)
 if __name__ == '__main__':
-    full_model = FullStockPredictionModel(
-        stock_ticker='^AEX',    # Using AEX index
-        years_of_data=10,       # Using 10 years of data
-        look_back=60,           # Common look_back period
-        random_seed=42
-    )
+    # Example of how one might loop through different LASSO alpha values:
+    # This part would typically be in a separate script that calls main.py.
+    # For demonstration, it's included here.
+    lasso_alpha_values_to_test = [0.001, 0.005, 0.01, 0.02] # Example values
+    all_results_by_alpha = {}
 
-    # Train with more epochs, relying on EarlyStopping in ATTLSTMModel
+    for alpha_val in lasso_alpha_values_to_test:
+        print(f"\n--- Running Full Model Training & Evaluation for LASSO alpha: {alpha_val} ---")
+        full_model = FullStockPredictionModel(
+            stock_ticker='^AEX',    # Using AEX index
+            years_of_data=10,       # Using 10 years of data
+            look_back=60,           # Common look_back period
+            random_seed=42,
+            lasso_alpha=alpha_val   # Pass current alpha
+        )
+
+        # Train with more epochs, relying on EarlyStopping in ATTLSTMModel
+        # Epochs and batch_size for the final training run after HPO.
+        # These could also be part of the tuned HPs.
+        print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
+        overall_start_time = time.time()
+        results = full_model.train_and_evaluate(
+            epochs=150, # Increased epochs for final training
+            batch_size=32
+        )
+        overall_end_time = time.time()
+        overall_duration = overall_end_time - overall_start_time
+        print(f"--- Full Model Training and Evaluation Took: {overall_duration:.2f} seconds ---")
+
+        if results:
+            all_results_by_alpha[alpha_val] = results["metrics"]
+            print(f"\n--- Results for LASSO alpha: {alpha_val} ---")
+            if "metrics" in results:
+                for key, value in results["metrics"].items():
+                    if isinstance(value, float):
+                        print(f"  {key.replace('_', ' ').title()}: {value:.4f}")
+                    elif isinstance(value, list):
+                        print(f"  {key.replace('_', ' ').title()}: {value}")
+                    else:
+                        print(f"  {key.replace('_', ' ').title()}: {value}")
+            # Basic production readiness test (prediction speed) can also be run here if needed per alpha
+        else:
+            print(f"Model training and evaluation failed for alpha {alpha_val}.")
+        print(f"--- Finished Run for LASSO alpha: {alpha_val} ---\n")
+
+    # After the loop, print a summary or analyze all_results_by_alpha
+    print("\n\n--- Summary of Results by LASSO Alpha ---")
+    for alpha_val, metrics in all_results_by_alpha.items():
+        print(f"\nAlpha: {alpha_val}")
+        print(f"  Selected Features Count: {metrics.get('selected_features_count', 'N/A')}")
+        print(f"  Overall RMSE: {metrics.get('overall_rmse', 'N/A'):.4f}")
+        print(f"  Overall MAE: {metrics.get('overall_mae', 'N/A'):.4f}")
+        # Add other key metrics you want to compare
+
+    # --- Original single run (can be commented out or removed if using the loop) ---
+    # full_model = FullStockPredictionModel(
+    #     stock_ticker='^AEX',    # Using AEX index
+    #     years_of_data=10,       # Using 10 years of data
+    #     look_back=60,           # Common look_back period
+    #     random_seed=42,
+    #     lasso_alpha=0.005       # Default alpha if not looping
+    # )
+    # print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
     # Epochs and batch_size for the final training run after HPO.
     # These could also be part of the tuned HPs.
     print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
@@ -297,26 +403,26 @@ if __name__ == '__main__':
 
     if results: # Check if results were returned (not empty on error)
         print("\n--- Final Results ---")
-        if "att_lstm_preds" in results and results["att_lstm_preds"] is not None:
+        if results.get("att_lstm_preds") is not None:
              print("Final ATT-LSTM Predictions (first 5):", results["att_lstm_preds"][:5])
-        # NSGM and Ensemble preds removed
-
         print("Actual Values (first 5):", results["actual_values"][:5])
 
-        print("\nMetrics from the run:")
-        # Only LSTM metrics are now relevant
-        if "lstm_mse" in results["metrics"]:
-            print(f"  ATT-LSTM Model:")
-            print(f"    MSE:  {results['metrics']['lstm_mse']:.4f}")
-            print(f"    MAE:  {results['metrics']['lstm_mae']:.4f}")
-            print(f"    RMSE: {results['metrics']['lstm_rmse']:.4f}")
-            if "lstm_rmse_perc" in results["metrics"]:
-                print(f"    RMSE as % of Mean Actuals: {results['metrics']['lstm_rmse_perc']:.2f}%")
+        print("\nDetailed Metrics from the run:")
+        if "metrics" in results:
+            for key, value in results["metrics"].items():
+                if isinstance(value, float):
+                    print(f"  {key.replace('_', ' ').title()}: {value:.4f}")
+                elif isinstance(value, list):
+                     print(f"  {key.replace('_', ' ').title()}: {value}") # For list of feature names
+                else:
+                    print(f"  {key.replace('_', ' ').title()}: {value}")
         else:
-            print("  ATT-LSTM Model: Metrics not available.")
+            print("  Metrics not available.")
 
         # --- Production Readiness Testing (Simulated) ---
-        if full_model.att_lstm_model and hasattr(full_model.att_lstm_model, 'model') and full_model.att_lstm_model.model is not None:
+        # Update the condition to check if full_model.att_lstm_model exists and has a model attribute
+        if hasattr(full_model, 'att_lstm_model') and full_model.att_lstm_model and \
+           hasattr(full_model.att_lstm_model, 'model') and full_model.att_lstm_model.model is not None:
             print("\n--- Production Readiness Testing (Prediction Speed) ---")
 
             # Need X_test_seq from the train_and_evaluate scope, or re-generate a sample
@@ -331,7 +437,8 @@ if __name__ == '__main__':
                 # Create a sample sequence for testing prediction speed
                 # This is a simplified way; ideally, use an actual X_test_seq sample
                 num_features = full_model.processed_df.shape[1]
-                sample_raw_data = np.random.rand(full_model.look_back, num_features) # Create dummy data matching shape
+                # Use float32 for dummy data, as TensorFlow models typically use this precision.
+                sample_raw_data = np.random.rand(full_model.look_back, num_features).astype(np.float32)
 
                 # For single instance prediction, the input needs to be (1, look_back, num_features)
                 single_instance_input = np.expand_dims(sample_raw_data, axis=0)
@@ -349,22 +456,22 @@ if __name__ == '__main__':
                     _ = full_model.att_lstm_model.predict(single_instance_input)
                     end_time = time.time()
                     single_pred_times.append(end_time - start_time)
-                    # print(f"Run {i+1}/{num_single_runs}, time: {(end_time - start_time)*1000:.2f} ms")
 
-
-                avg_single_pred_time = np.mean(single_pred_times)
-                print(f"Average single instance prediction time: {avg_single_pred_time*1000:.2f} ms (over {num_single_runs} runs)")
+                avg_single_pred_time_ms = np.mean(single_pred_times) * 1000
+                print(f"Average single instance prediction time: {avg_single_pred_time_ms:.2f} ms (over {num_single_runs} runs)")
+                if results and "metrics" in results: # Store if results dict is available
+                    results["metrics"]["latency_single_pred_ms"] = avg_single_pred_time_ms
 
                 # Time batch instance prediction
                 batch_size_test = 32
                 # Create a batch of dummy data: (batch_size_test, look_back, num_features)
-                batch_input = np.random.rand(batch_size_test, full_model.look_back, num_features)
+                batch_input = np.random.rand(batch_size_test, full_model.look_back, num_features).astype(np.float32)
 
                 # Warm-up call for batch prediction
                 print(f"Performing warm-up prediction for batch (size {batch_size_test})...")
                 _ = full_model.att_lstm_model.predict(batch_input)
 
-                num_batch_runs = 10 # Increased from 5
+                num_batch_runs = 10
                 batch_pred_times = []
                 print(f"Timing batch prediction (size {batch_size_test}) over {num_batch_runs} runs...")
                 for i in range(num_batch_runs):
@@ -372,18 +479,74 @@ if __name__ == '__main__':
                     _ = full_model.att_lstm_model.predict(batch_input)
                     end_time = time.time()
                     batch_pred_times.append(end_time - start_time)
-                    # print(f"Run {i+1}/{num_batch_runs}, time: {(end_time - start_time)*1000:.2f} ms")
 
-                avg_batch_pred_time_total = np.mean(batch_pred_times)
-                avg_batch_pred_time_per_instance = avg_batch_pred_time_total / batch_size_test
-                print(f"Average batch ({batch_size_test} instances) prediction time: {avg_batch_pred_time_total*1000:.2f} ms (total)")
-                print(f"Average per-instance prediction time in batch: {avg_batch_pred_time_per_instance*1000:.2f} ms (over {num_batch_runs} runs)")
+                avg_batch_pred_time_total_ms = np.mean(batch_pred_times) * 1000
+                avg_batch_pred_time_per_instance_ms = (np.mean(batch_pred_times) / batch_size_test) * 1000
+
+                print(f"Average batch ({batch_size_test} instances) prediction time: {avg_batch_pred_time_total_ms:.2f} ms (total)")
+                print(f"Average per-instance prediction time in batch: {avg_batch_pred_time_per_instance_ms:.2f} ms (over {num_batch_runs} runs)")
+
+                if results and "metrics" in results: # Store if results dict is available
+                    results["metrics"]["latency_batch_total_ms"] = avg_batch_pred_time_total_ms
+                    results["metrics"]["latency_batch_per_instance_ms"] = avg_batch_pred_time_per_instance_ms
             else:
                 print("Could not perform prediction speed test: processed_df not available.")
         else:
             print("ATT-LSTM model not available for production readiness testing.")
 
-    else:
+    # Storing results from the loop example for LASSO alpha
+    if 'all_results_by_alpha' in locals() and all_results_by_alpha:
+        print("\n\n--- Summary of Results by LASSO Alpha ---")
+        for alpha_val, metrics_summary in all_results_by_alpha.items():
+            print(f"\nAlpha: {alpha_val}")
+            print(f"  Selected Features Count: {metrics_summary.get('selected_features_count', 'N/A')}")
+            # Ensure metrics are float before formatting, or handle potential missing keys gracefully
+            overall_rmse_val = metrics_summary.get('overall_rmse', float('nan'))
+            overall_mae_val = metrics_summary.get('overall_mae', float('nan'))
+            print(f"  Overall RMSE: {overall_rmse_val:.4f}")
+            print(f"  Overall MAE: {overall_mae_val:.4f}")
+            # Add other key metrics you want to compare
+    elif not results: # If not in a loop and results is None (e.g. initial run failed)
         print("Model training and evaluation did not complete successfully.")
 
+    # --- Original single run (can be commented out or removed if using the loop) ---
+    # full_model = FullStockPredictionModel(
+    #     stock_ticker='^AEX',    # Using AEX index
+    #     years_of_data=10,       # Using 10 years of data
+    #     look_back=60,           # Common look_back period
+    #     random_seed=42,
+    #     lasso_alpha=0.005       # Default alpha if not looping
+    # )
+    # print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
+    # Epochs and batch_size for the final training run after HPO.
+    # These could also be part of the tuned HPs.
+    # print("\n--- Starting Full Model Training and Evaluation (including timing) ---")
+    # overall_start_time = time.time()
+    # results = full_model.train_and_evaluate(
+    #     epochs=150, # Increased epochs for final training
+    #     batch_size=32
+    # )
+    # overall_end_time = time.time()
+    # overall_duration = overall_end_time - overall_start_time
+    # print(f"--- Full Model Training and Evaluation Took: {overall_duration:.2f} seconds ---")
+
+    # if results: # Check if results were returned (not empty on error)
+    #     print("\n--- Final Results ---")
+    #     if results.get("att_lstm_preds") is not None:
+    #          print("Final ATT-LSTM Predictions (first 5):", results["att_lstm_preds"][:5])
+    #     print("Actual Values (first 5):", results["actual_values"][:5])
+
+    #     print("\nDetailed Metrics from the run:")
+    #     if "metrics" in results:
+    #         for key, value in results["metrics"].items():
+    #             if isinstance(value, float):
+    #                 print(f"  {key.replace('_', ' ').title()}: {value:.4f}")
+    #             elif isinstance(value, list):
+    #                  print(f"  {key.replace('_', ' ').title()}: {value}") # For list of feature names
+    #             else:
+    #                 print(f"  {key.replace('_', ' ').title()}: {value}")
+    #     else:
+    #         print("  Metrics not available.")
+    # else:
+    #     print("Model training and evaluation did not complete successfully.")
 
