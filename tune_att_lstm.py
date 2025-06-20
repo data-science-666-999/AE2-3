@@ -61,39 +61,45 @@ def build_hypermodel(hp):
 
 def main_tuner(
     stock_ticker="^AEX",
-    years_of_data=10,
-    project_name_prefix="stock_att_lstm_hyperband",
-    look_back_period=60 # Added look_back_period as a parameter
+    years_of_data=3, # Default to 3 years for quicker test runs of the tuner script
+    project_name_prefix="stock_att_lstm_hyperband_test", # Indicate it's a test run
+    look_back_period=60,
+    max_epochs_hyperband=27, # Reduced for quicker test runs
+    hyperband_iterations=1,  # Reduced for quicker test runs
+    early_stopping_patience=5 # Adjusted for fewer epochs
 ):
     """
     Main function to run KerasTuner with Hyperband for a specific look_back_period.
     """
-    project_name = f"{project_name_prefix}_{look_back_period}d_lookback"
+    project_name = f"{project_name_prefix}_{years_of_data}yr_{look_back_period}d_lookback"
     print(f"Starting hyperparameter tuning for {stock_ticker} using {years_of_data} years of data.")
     print(f"Using look_back_period = {look_back_period} for data preparation and model input shape.")
+    print(f"Hyperband: max_epochs={max_epochs_hyperband}, iterations={hyperband_iterations}, early_stopping_patience={early_stopping_patience}")
 
     # --- 1. Data Preparation ---
-    data_preprocessor = DataPreprocessor(stock_ticker=stock_ticker, years_of_data=years_of_data, random_seed=42)
+    # Use a default lasso_alpha for tuning runs; it can be experimented with separately.
+    data_preprocessor = DataPreprocessor(stock_ticker=stock_ticker, years_of_data=years_of_data, random_seed=42, lasso_alpha=0.005)
 
-    # We need all outputs from preprocess to correctly use it, although only processed_df is used here.
-    # The other outputs (scaler, selected_features, df_all_indicators) are not directly used by the tuner
-    # but calling the full preprocess() is consistent with how main.py uses it.
-    processed_df, _, _, _ = data_preprocessor.preprocess()
-
+    processed_df, _, selected_features, _ = data_preprocessor.preprocess()
 
     if processed_df.empty:
         print("Error: Preprocessed data is empty. Aborting tuning.")
         return
+    print(f"Data preprocessed. Number of selected features by LASSO: {len(selected_features)}")
+    print(f"Processed data shape: {processed_df.shape}")
+
 
     target_column_name = processed_df.columns[-1]
 
     # Create sequences function (adapted from FullStockPredictionModel)
+    # Ensure 'look_back' used in range is the current_look_back being tuned.
     def create_sequences_for_tuning(data, current_look_back, target_col_name):
         target_col_idx = data.columns.get_loc(target_col_name)
         X, y = [], []
-        for i in range(len(data) - look_back):
-            X.append(data.iloc[i:(i + look_back), :].values)
-            y.append(data.iloc[i + look_back, target_col_idx])
+        # Corrected: use current_look_back in the loop range
+        for i in range(len(data) - current_look_back):
+            X.append(data.iloc[i:(i + current_look_back), :].values)
+            y.append(data.iloc[i + current_look_back, target_col_idx])
         return np.array(X), np.array(y)
 
     # Use the passed look_back_period for sequence creation
@@ -151,49 +157,33 @@ def main_tuner(
     tuner = kt.Hyperband(
         hypermodel=build_hypermodel_with_shape,
         objective='val_loss',
-        max_epochs=81, # Max epochs for the best models (e.g., factor=3, iterations=1 -> 3^0*X, 3^1*X, 3^2*X, 3^3*X, 3^4*X. If X=1, then 1,3,9,27,81)
-                       # A common setup: max_epochs=81, factor=3. This implies configurations are trained for 1, 3, 9, 27, 81 epochs.
-                       # Or, if max_epochs is total for one config, then for Hyperband it's max_epochs for the full training of one version.
-                       # KerasTuner Hyperband: max_epochs is the number of epochs to train a model for in the last bracket.
+        max_epochs=max_epochs_hyperband, # Use the passed parameter
         factor=3,
-        hyperband_iterations=2, # Run the Hyperband algorithm twice.
-        directory='keras_tuner_dir',
-        project_name=project_name, # Updated project name
-        overwrite=True
+        hyperband_iterations=hyperband_iterations, # Use the passed parameter
+        directory='keras_tuner_dir', # Main directory for all tuning projects
+        project_name=project_name,   # Subdirectory for this specific tuning run
+        overwrite=True # Overwrite previous results for this specific project_name
     )
 
     tuner.search_space_summary()
 
     # --- 3. Run Search ---
     print("Starting KerasTuner Hyperband search...")
-    # Early stopping for each trial within Hyperband
-    # Patience should be appropriate for the number of epochs in each Hyperband round.
-    # Smallest number of epochs could be max_epochs / factor^log_factor(max_epochs) approx.
-    # For max_epochs=81, factor=3 => 81/3^4 = 1.  Smallest epochs = 1.
-    # Next round: 3 epochs, then 9, 27, 81.
-    # Patience of 5-10 might be reasonable for rounds with more epochs.
-    early_stopping_cb = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    early_stopping_cb = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=early_stopping_patience, # Use the passed parameter
+        restore_best_weights=True
+    )
 
-    # The `epochs` parameter in search() for Hyperband is the number of epochs to train configurations for in the first bracket.
-    # This is a bit confusing. KerasTuner's Hyperband `epochs` in `search` is more like an overall training budget indicator.
-    # The actual epochs per trial are managed by Hyperband's successive halving.
-    # Let's rely on max_epochs in Hyperband constructor and a high number for search epochs.
-    # From KerasTuner docs: "epochs: Number of epochs to train each model.
-    # This parameter is overridden by the `max_epochs` argument of the `Hyperband` Tuner."
-    # So, the `epochs` in `search` might not be strictly necessary here if `max_epochs` is set in Hyperband.
-    # However, it's often provided. Let's set it to `max_epochs`.
-
-    # Note on Tuning Time: To reduce KerasTuner search time for quicker iterations (at the cost of potentially
-    # less optimal hyperparameters), you can:
-    # 1. Reduce `max_epochs` in the Hyperband tuner (e.g., to 40 or 27).
-    # 2. Reduce `hyperband_iterations` (e.g., to 1).
-    # 3. Use a smaller subset of data for tuning if appropriate, though this might generalize poorly.
+    # The `epochs` in `search` is often set to a high number or related to `max_epochs` for Hyperband.
+    # KerasTuner documentation indicates it's overridden by `max_epochs` in the Hyperband constructor.
+    # Setting it equal to `max_epochs_hyperband` for clarity.
     tuner.search(
         X_train_seq, y_train_seq,
-        epochs=81, # Corresponds to max_epochs for Hyperband, typically overridden by tuner's max_epochs.
+        epochs=max_epochs_hyperband, # Use the passed parameter
         validation_data=(X_val_seq, y_val_seq),
         callbacks=[early_stopping_cb],
-        batch_size=32 # Batch size can also be a hyperparameter if desired (defined in ATTLSTMModel.build_model)
+        batch_size=32 # This could also be tuned. For now, fixed.
     )
 
     # --- 4. Results ---
@@ -222,23 +212,52 @@ if __name__ == '__main__':
     # Example of how one might loop through different look_back periods:
     # This part would typically be in a separate script that calls main_tuner.
     # For demonstration, it's included here.
-    look_back_values_to_test = [30, 60, 90] # Example values
+    # --- Configuration for the tuning runs ---
+    # For a quick test of the script:
+    test_look_back_values = [30, 60] # Test with a couple of look_back values
+    test_years = 3                   # Use 3 years of data for faster runs
+    test_max_epochs = 27             # Max epochs for Hyperband's last bracket
+    test_hyperband_iterations = 1    # Number of Hyperband iterations
+    test_early_stopping_patience = 5
 
-    for lb_period in look_back_values_to_test:
+    # For a more comprehensive tuning run (can be time-consuming):
+    # full_look_back_values = [30, 60, 90, 120]
+    # full_years = 10 # Or 15 as per plan
+    # full_max_epochs = 81
+    # full_hyperband_iterations = 2 # Or 3 for more thoroughness
+    # full_early_stopping_patience = 10
+
+    # --- Select which configuration to run ---
+    # Change these to 'full_*' variables for a comprehensive run
+    current_look_back_values = test_look_back_values
+    current_years = test_years
+    current_max_epochs = test_max_epochs
+    current_hyperband_iterations = test_hyperband_iterations
+    current_early_stopping_patience = test_early_stopping_patience
+    project_prefix = "stock_att_lstm_tuning_test" # Change if doing a full run
+
+
+    print(f"--- Starting KerasTuner Optimization Script ---")
+    print(f"Running with: Look_backs={current_look_back_values}, Years={current_years}, MaxEpochs={current_max_epochs}, HB_Iterations={current_hyperband_iterations}")
+
+    for lb_period in current_look_back_values:
         print(f"\n--- Running Tuner for Look-Back Period: {lb_period} ---")
         main_tuner(
-            stock_ticker="^AEX", # Or pass as args
-            years_of_data=10,    # Or pass as args
-            project_name_prefix="stock_att_lstm_tuning_lb_opt", # Unique prefix for this optimization effort
-            look_back_period=lb_period
+            stock_ticker="^AEX", # Or make this a parameter
+            years_of_data=current_years,
+            project_name_prefix=project_prefix,
+            look_back_period=lb_period,
+            max_epochs_hyperband=current_max_epochs,
+            hyperband_iterations=current_hyperband_iterations,
+            early_stopping_patience=current_early_stopping_patience
         )
         print(f"--- Tuner Run for Look-Back Period: {lb_period} Finished ---")
 
-    print("\nKerasTuner script for look_back optimization finished.")
+    print("\n--- KerasTuner Script for Look-Back Optimization Finished ---")
 
 # Note on look_back tuning:
 # The current setup runs the entire KerasTuner search for each look_back period.
 # After these runs, one would compare the best model performance (e.g., test loss from tuner.evaluate)
-# and potentially training times from each tuner run (project_name directory) to select an optimal look_back.
-# The `fixed_look_back` in ATTLSTMModel constructor is mostly for its internal sequence creation
-# method (if used), but input_shape (derived from look_back_period here) is the primary driver for the model layers.
+# and potentially training times from each tuner run (project_name directory) to select an optimal look_back
+# and its corresponding hyperparameters.
+# The `input_shape` (derived from look_back_period here) is the primary driver for the model layers.

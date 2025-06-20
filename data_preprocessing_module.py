@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.linear_model import Lasso
 # from sklearn.model_selection import train_test_split # No longer needed here for example
 import yfinance as yf
@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import os
 import pickle
 from datetime import date # For cache invalidation
+from arch import arch_model # For GARCH models
 
 # Define a cache directory
 CACHE_DIR = "data_cache"
@@ -17,11 +18,13 @@ CACHE_DIR = "data_cache"
 # --- Module 1: Data Acquisition and Preprocessing ---
 
 class DataPreprocessor:
-    def __init__(self, stock_ticker='AEL', years_of_data=10, random_seed=42, lasso_alpha=0.005): # Default alpha
+    def __init__(self, stock_ticker='AEL', years_of_data=10, random_seed=42, lasso_alpha=0.005, use_differencing=False): # Default alpha
         self.stock_ticker = stock_ticker
         self.years_of_data = years_of_data
         self.random_seed = random_seed
-        self.lasso_alpha = lasso_alpha # Store alpha
+        self.lasso_alpha = lasso_alpha
+        self.use_differencing = use_differencing
+        self.first_price_before_diff = None # To store the value needed for inverse differencing
         np.random.seed(self.random_seed)
         os.makedirs(CACHE_DIR, exist_ok=True) # Ensure cache directory exists
 
@@ -168,6 +171,52 @@ class DataPreprocessor:
         # Clean up Returns column as it's intermediate
         df.drop(columns=['Returns'], inplace=True, errors='ignore')
 
+        # GARCH Model for Volatility Forecasting
+        # Calculate daily returns for GARCH model (use 'Close' price)
+        # Ensure 'Close' is a Series and exists
+        if 'Close' in df.columns:
+            garch_returns = df['Close'].pct_change().dropna() * 100 # Multiply by 100 for GARCH
+            if not garch_returns.empty:
+                try:
+                    # Fit GARCH(1,1) model - common choice
+                    # Use 'Constant' mean, 'GARCH' vol, p=1, q=1.
+                    # Turn off display output from arch_model
+                    garch = arch_model(garch_returns, vol='Garch', p=1, q=1, mean='Constant', dist='Normal', show_warning=False)
+                    garch_results = garch.fit(disp='off', show_warning=False)
+
+                    # Forecast conditional volatility (1-step ahead)
+                    # The forecast object contains mean, variance, and residual variance.
+                    # We are interested in the conditional variance.
+                    forecast = garch_results.forecast(horizon=1, reindex=False) # reindex=False to align with end of sample
+                    # The variance is typically forecast.volatility.values[-1,0]^2 or forecast.variance.values[-1,0]
+                    # The .forecast() method returns an ARCHModelForecast object.
+                    # The conditional variance is in forecast.variance
+                    # We need to align this with the original DataFrame index.
+                    # The forecast is for the next period, so shift variance back to align with current day's features
+                    # The variance is for t+1, based on info at t. So, it's a feature for predicting t+1 price.
+                    # We shift it to align with the day 't' features.
+                    df['GARCH_Volatility'] = np.nan
+                    # The variance forecast is for the period *after* the last observation in garch_returns.
+                    # So, garch_results.conditional_volatility is for in-sample.
+                    # forecast.variance.iloc[0] would be the first out-of-sample forecast.
+                    # We need in-sample conditional volatility as a feature.
+                    # garch_results.conditional_volatility is already aligned with garch_returns's index.
+                    df.loc[garch_returns.index, 'GARCH_Volatility'] = garch_results.conditional_volatility
+                    # Forward fill NaNs at the beginning that GARCH couldn't compute for,
+                    # and also any at the end if the forecast object was used differently.
+                    df['GARCH_Volatility'].fillna(method='bfill', inplace=True)
+                    df['GARCH_Volatility'].fillna(method='ffill', inplace=True) # Fill any remaining
+                    print("GARCH Volatility feature calculated and added.")
+                except Exception as e:
+                    print(f"Error calculating GARCH volatility: {e}. Proceeding without GARCH feature.")
+                    df['GARCH_Volatility'] = 0 # Add a placeholder column if GARCH fails
+            else:
+                print("Not enough return data to calculate GARCH volatility. Proceeding without GARCH feature.")
+                df['GARCH_Volatility'] = 0 # Placeholder
+        else:
+            print("Close column not found, cannot calculate GARCH returns. Proceeding without GARCH feature.")
+            df['GARCH_Volatility'] = 0 # Placeholder
+
 
         print(f"Shape after adding all indicators and new volatility features: {df.shape}")
         return df
@@ -311,134 +360,141 @@ class DataPreprocessor:
         # 3. lasso_model (the fitted LASSO model itself)
         # 4. df_with_all_indicators_cleaned (df with all indicators, NaNs dropped, before LASSO selection - useful for volatility analysis)
         # Pass self.lasso_alpha to _apply_lasso_feature_selection implicitly by using it from self
+        # Determine target column name (it might be 'Close' or 'Close_Ticker' if flattened)
+        # For simplicity, assume 'Close' is the primary target. If it gets renamed, LASSO selection handles it.
+        raw_target_column = 'Close' # The original name before any potential flattening
+
         processed_data_for_scaling, selected_features_names, lasso_model, df_with_all_indicators_cleaned = \
-            self._apply_lasso_feature_selection(stock_data_with_indicators.copy(), target_column='Close')
+            self._apply_lasso_feature_selection(stock_data_with_indicators.copy(), target_column=raw_target_column)
 
         self.lasso_model = lasso_model # Store for access if needed
 
         if processed_data_for_scaling.empty:
             print("Preprocessing failed: No data after feature selection.")
-            # Return empty DataFrame, None for scaler, empty list for selected features, and empty df for all indicators
-            return pd.DataFrame(), None, [], pd.DataFrame()
+            return pd.DataFrame(), None, [], pd.DataFrame(), None
 
+        # --- Differencing (Optional) ---
+        # The target column is the last one in processed_data_for_scaling
+        target_col_name_in_df = processed_data_for_scaling.columns[-1]
+
+        if self.use_differencing:
+            print(f"Applying differencing to target column: {target_col_name_in_df}")
+            # Store the first value of the original target series for inverse differencing later
+            # This must be from processed_data_for_scaling *before* differencing, but *after* NaN drop and LASSO.
+            self.first_price_before_diff = processed_data_for_scaling[target_col_name_in_df].iloc[0]
+
+            # Perform differencing on the target column
+            diff_values = processed_data_for_scaling[target_col_name_in_df].diff().dropna()
+
+            # Update the target column in processed_data_for_scaling with differenced values
+            # Align indices: the first row will be NaN due to diff, so drop it from the whole df
+            processed_data_for_scaling = processed_data_for_scaling.iloc[1:]
+            processed_data_for_scaling.loc[:, target_col_name_in_df] = diff_values.values # Use .loc to avoid SettingWithCopyWarning
+
+            print(f"Shape after differencing and dropping first row: {processed_data_for_scaling.shape}")
+            # Also adjust df_with_all_indicators_cleaned to match the new index if differencing is applied
+            if not df_with_all_indicators_cleaned.empty and not processed_data_for_scaling.empty:
+                 df_with_all_indicators_cleaned = df_with_all_indicators_cleaned.loc[processed_data_for_scaling.index]
+
+
+        # --- Scaling ---
         print("Normalizing data...")
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_data_values = scaler.fit_transform(processed_data_for_scaling)
-        scaled_df = pd.DataFrame(scaled_data_values,
-                                 columns=processed_data_for_scaling.columns,
-                                 index=processed_data_for_scaling.index)
+        # For features, always use MinMaxScaler for now
+        feature_scaler = MinMaxScaler(feature_range=(0, 1))
+
+        # For target, use StandardScaler if differenced, else MinMaxScaler
+        if self.use_differencing:
+            print(f"Using StandardScaler for differenced target column: {target_col_name_in_df}")
+            target_scaler = StandardScaler()
+        else:
+            print(f"Using MinMaxScaler for target column: {target_col_name_in_df}")
+            target_scaler = MinMaxScaler(feature_range=(0, 1))
+
+        # Separate features and target for scaling
+        features_df = processed_data_for_scaling.drop(columns=[target_col_name_in_df])
+        target_series = processed_data_for_scaling[[target_col_name_in_df]] # Keep as DataFrame for scaler
+
+        # Scale features
+        scaled_features_values = feature_scaler.fit_transform(features_df)
+        scaled_features_df = pd.DataFrame(scaled_features_values, columns=features_df.columns, index=features_df.index)
+
+        # Scale target
+        scaled_target_values = target_scaler.fit_transform(target_series)
+        scaled_target_df = pd.DataFrame(scaled_target_values, columns=target_series.columns, index=target_series.index)
+
+        # Combine scaled features and target
+        scaled_df = pd.concat([scaled_features_df, scaled_target_df], axis=1)
+
+        # Store the scaler for the target separately for inverse transformation
+        # The main self.data_scaler in FullStockPredictionModel will be this target_scaler.
+        # For features, their inverse transform is not typically needed if only target is predicted.
+        # However, the current inverse transform logic in FullStockPredictionModel assumes one scaler for all.
+        # This needs to be handled carefully.
+        # For now, preprocess() will return the target_scaler.
+        # The FullStockPredictionModel will need to be adapted if features also need inverse transform with a different scaler.
 
         print("Data preprocessing complete.")
         print(f"Final shape of preprocessed data to be used by model: {scaled_df.shape}")
         if not scaled_df.empty:
             print("Final columns in preprocessed data (target is last):", scaled_df.columns.tolist())
 
-        # Return scaled_df, scaler, selected_features_names, and df_with_all_indicators_cleaned
-        return scaled_df, scaler, selected_features_names, df_with_all_indicators_cleaned
+        # Return scaled_df, the scaler for the target, selected_features_names, and df_with_all_indicators_cleaned
+        # Also return self.first_price_before_diff if differencing was used.
+        return scaled_df, target_scaler, selected_features_names, df_with_all_indicators_cleaned, self.first_price_before_diff
+
 
 # Example Usage (for testing the module)
 if __name__ == '__main__':
-    preprocessor = DataPreprocessor(stock_ticker='AAPL', years_of_data=1)
-    original_target_column = 'Close'
+    # Test case 1: No differencing
+    print("\n--- Testing DataPreprocessor without differencing ---")
+    preprocessor_no_diff = DataPreprocessor(stock_ticker='AAPL', years_of_data=1, use_differencing=False)
     try:
-        # Update to reflect new return values
-        processed_df, data_scaler, selected_features, df_all_indicators = preprocessor.preprocess()
+        processed_df_no_diff, target_scaler_no_diff, selected_features_no_diff, df_all_indicators_no_diff, first_val_no_diff = preprocessor_no_diff.preprocess()
+        if not processed_df_no_diff.empty:
+            print(f"  Processed DF shape (no diff): {processed_df_no_diff.shape}")
+            print(f"  Target scaler type (no diff): {type(target_scaler_no_diff)}")
+            print(f"  First value for inv diff (no diff): {first_val_no_diff}") # Should be None
+            # Example of inverse transform for non-differenced data
+            if target_scaler_no_diff and processed_df_no_diff.shape[1] > 0 : # Check if there's a target column
+                target_col_name = processed_df_no_diff.columns[-1]
+                dummy_scaled_target = processed_df_no_diff[[target_col_name]].iloc[[0]].copy() # Get first scaled target value
+                original_target_val = target_scaler_no_diff.inverse_transform(dummy_scaled_target)
+                print(f"  Example inverse transform (no diff) of {dummy_scaled_target.iloc[0,0]:.4f} -> {original_target_val[0,0]:.4f}")
 
-        if not processed_df.empty:
-            print("\n--- DataPreprocessor Module Test Results ---")
-            print("\nSelected Features by LASSO:")
-            print(selected_features)
-            print(f"\nNumber of selected features: {len(selected_features)}")
-
-            print("\nDataFrame with all indicators (head):")
-            print(df_all_indicators.head())
-            print("\n1. Processed Data Head:")
-            print(processed_df.head())
-            print("\n2. Processed Data Info:")
-            processed_df.info()
-            print("\n3. Shape of processed data:", processed_df.shape)
-
-            print("\n4. Descriptive Statistics of Processed Data:")
-            print(processed_df.describe())
-
-            print("\n5. NaN check in final processed data (sum):")
-            print(processed_df.isnull().sum())
-
-            # LASSO feature selection details
-            if hasattr(preprocessor, 'lasso_model') and preprocessor.lasso_model:
-                print("\n6. LASSO Feature Selection Details:")
-                # The actual features used for LASSO (excluding the target)
-                # are the columns of processed_df minus the last one (which is the target)
-                lasso_feature_names = processed_df.columns[:-1].tolist()
-
-                # Verify target column name after potential flattening in _apply_lasso_feature_selection
-                # The last column of processed_df is the target.
-                actual_target_column_name = processed_df.columns[-1]
-                print(f"   Target column for LASSO (determined dynamically): {actual_target_column_name}")
-
-                selected_coeffs = preprocessor.lasso_model.coef_
-
-                # Filter out zero coefficients for selected features display
-                # Note: lasso_feature_names are from the *scaled* data fed to LASSO,
-                # which should align with processed_df.columns[:-1]
-
-                actual_selected_features = []
-                actual_selected_coeffs = []
-                print(f"   Number of features input to LASSO (excluding target): {len(lasso_feature_names)}")
-                print(f"   Number of coefficients from LASSO: {len(selected_coeffs)}")
-
-                # Reconstruct the feature list that LASSO actually saw (before it selected from them)
-                # This needs to be done carefully if yfinance ticker was part of column names
-                # For AEL, it becomes Close_AEL, High_AEL etc.
-                # The _apply_lasso_feature_selection method handles this flattening.
-                # features_df.columns within that method holds the correct names.
-                # For now, let's assume lasso_feature_names is correct.
-
-                # The features that LASSO selected are those with non-zero coefficients.
-                # The `selected_feature_names` variable from `_apply_lasso_feature_selection`
-                # already holds this, which are the columns of `processed_df[:-1]`
-                print(f"   Selected features by LASSO (non-zero coefficients): {lasso_feature_names}")
-
-                if lasso_feature_names: # Check if there are features to plot
-                    plt.figure(figsize=(12, 8))
-                    plt.bar(lasso_feature_names, selected_coeffs[:len(lasso_feature_names)]) # Ensure we only plot for available names
-                    plt.xlabel("Features")
-                    plt.ylabel("LASSO Coefficient Value")
-                    plt.title("LASSO Feature Coefficients")
-                    plt.xticks(rotation=90)
-                    plt.tight_layout()
-                    plot_filename = "lasso_feature_coefficients.png"
-                    plt.savefig(plot_filename)
-                    print(f"\n   LASSO coefficients plot saved as {plot_filename} in {os.path.abspath('.')}")
-                    plt.close()
-                else:
-                    print("   No features selected by LASSO to plot.")
-
-            else:
-                print("\n6. LASSO Model not available or no features selected.")
-
-
-            if data_scaler and actual_target_column_name in processed_df.columns:
-                print(f"\n7. Example of Inverse Transformation (Target: {actual_target_column_name}):")
-                if len(processed_df) > 0:
-                    dummy_row = processed_df.iloc[[0]].copy()
-                    target_col_idx_in_processed_df = processed_df.columns.get_loc(actual_target_column_name)
-                    example_scaled_target = dummy_row.iloc[0, target_col_idx_in_processed_df]
-
-                    original_row_values = data_scaler.inverse_transform(dummy_row)
-                    original_target = original_row_values[0, target_col_idx_in_processed_df]
-                    print(f"   Scaled Target '{actual_target_column_name}' {example_scaled_target:.4f} from first row inverse transforms to: {original_target:.4f}")
-                else:
-                    print("   Cannot demonstrate inverse transform: processed_df is empty.")
-            else:
-                print(f"\n7. Cannot demonstrate inverse transform: Scaler or target column '{actual_target_column_name}' missing.")
-            print("\n--- End of DataPreprocessor Module Test ---")
         else:
-            print("Preprocessing returned an empty DataFrame. Cannot display details.")
-
+            print("  Preprocessing (no diff) returned an empty DataFrame.")
     except Exception as e:
-        print(f"An error occurred during preprocessing: {e}")
+        print(f"  Error during no_diff preprocessing test: {e}")
         import traceback
         traceback.print_exc()
 
+    # Test case 2: With differencing
+    print("\n--- Testing DataPreprocessor WITH differencing ---")
+    preprocessor_with_diff = DataPreprocessor(stock_ticker='AAPL', years_of_data=1, use_differencing=True)
+    try:
+        processed_df_with_diff, target_scaler_with_diff, selected_features_with_diff, df_all_indicators_with_diff, first_val_with_diff = preprocessor_with_diff.preprocess()
+        if not processed_df_with_diff.empty:
+            print(f"  Processed DF shape (with diff): {processed_df_with_diff.shape}")
+            print(f"  Target scaler type (with diff): {type(target_scaler_with_diff)}")
+            print(f"  First value for inv diff (with diff): {first_val_with_diff}") # Should have a value
+            # Example of inverse transform for differenced data
+            if target_scaler_with_diff and first_val_with_diff is not None and processed_df_with_diff.shape[1] > 0:
+                target_col_name = processed_df_with_diff.columns[-1]
+                dummy_scaled_diff_target = processed_df_with_diff[[target_col_name]].iloc[[0]].copy()
+                original_diff_val = target_scaler_with_diff.inverse_transform(dummy_scaled_diff_target)
+                # To get original price: first_price_before_diff + cumsum(original_diff_values)
+                # For a single value: last_actual_price + original_diff_val
+                # Here, we only have the first scaled diff, so its inverse is the first original diff.
+                # The "original price" would be first_val_with_diff + original_diff_val[0,0]
+                reconstructed_price = first_val_with_diff + original_diff_val[0,0]
+                print(f"  Example inverse transform (with diff) of scaled_diff {dummy_scaled_diff_target.iloc[0,0]:.4f} -> original_diff {original_diff_val[0,0]:.4f}")
+                print(f"  Reconstructed price for this first diff: {first_val_with_diff:.2f} (first price) + {original_diff_val[0,0]:.4f} (first diff) = {reconstructed_price:.4f}")
+        else:
+            print("  Preprocessing (with diff) returned an empty DataFrame.")
+    except Exception as e:
+        print(f"  Error during with_diff preprocessing test: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n--- End of DataPreprocessor Module Test ---")
 
