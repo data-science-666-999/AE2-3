@@ -80,7 +80,9 @@ def main_tuner(
     # Use a default lasso_alpha for tuning runs; it can be experimented with separately.
     data_preprocessor = DataPreprocessor(stock_ticker=stock_ticker, years_of_data=years_of_data, random_seed=42, lasso_alpha=0.005)
 
-    processed_df, _, selected_features, _ = data_preprocessor.preprocess()
+    # Ensure this matches the return signature of DataPreprocessor.preprocess()
+    # It now returns 5 values: scaled_df, target_scaler, selected_features_names, df_with_all_indicators_cleaned, first_price_before_diff
+    processed_df, _, selected_features, _, _ = data_preprocessor.preprocess()
 
     if processed_df.empty:
         print("Error: Preprocessed data is empty. Aborting tuning.")
@@ -214,27 +216,27 @@ if __name__ == '__main__':
     # For demonstration, it's included here.
     # --- Configuration for the tuning runs ---
     # For a quick test of the script:
-    test_look_back_values = [30, 60] # Test with a couple of look_back values
-    test_years = 3                   # Use 3 years of data for faster runs
-    test_max_epochs = 27             # Max epochs for Hyperband's last bracket
-    test_hyperband_iterations = 1    # Number of Hyperband iterations
-    test_early_stopping_patience = 5
+    # test_look_back_values = [30, 60] # Test with a couple of look_back values
+    # test_years = 3                   # Use 3 years of data for faster runs
+    # test_max_epochs = 27             # Max epochs for Hyperband's last bracket
+    # test_hyperband_iterations = 1    # Number of Hyperband iterations
+    # test_early_stopping_patience = 5
 
     # For a more comprehensive tuning run (can be time-consuming):
-    # full_look_back_values = [30, 60, 90, 120]
-    # full_years = 10 # Or 15 as per plan
-    # full_max_epochs = 81
-    # full_hyperband_iterations = 2 # Or 3 for more thoroughness
-    # full_early_stopping_patience = 10
+    full_look_back_values = [30, 60, 90, 120]
+    full_years = 3 # Or 15 as per plan
+    full_max_epochs = 81
+    full_hyperband_iterations = 2 # Or 3 for more thoroughness
+    full_early_stopping_patience = 10
 
     # --- Select which configuration to run ---
     # Change these to 'full_*' variables for a comprehensive run
-    current_look_back_values = test_look_back_values
-    current_years = test_years
-    current_max_epochs = test_max_epochs
-    current_hyperband_iterations = test_hyperband_iterations
-    current_early_stopping_patience = test_early_stopping_patience
-    project_prefix = "stock_att_lstm_tuning_test" # Change if doing a full run
+    current_look_back_values = full_look_back_values
+    current_years = full_years
+    current_max_epochs = full_max_epochs
+    current_hyperband_iterations = full_hyperband_iterations
+    current_early_stopping_patience = full_early_stopping_patience
+    project_prefix = "stock_att_lstm_tuning_full_3yr" # Change if doing a full run
 
 
     print(f"--- Starting KerasTuner Optimization Script ---")
