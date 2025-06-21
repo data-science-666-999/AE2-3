@@ -181,8 +181,8 @@ class DataPreprocessor:
                     # Fit GARCH(1,1) model - common choice
                     # Use 'Constant' mean, 'GARCH' vol, p=1, q=1.
                     # Turn off display output from arch_model
-                    garch = arch_model(garch_returns, vol='Garch', p=1, q=1, mean='Constant', dist='Normal', show_warning=False)
-                    garch_results = garch.fit(disp='off', show_warning=False)
+                    garch = arch_model(garch_returns, vol='Garch', p=1, q=1, mean='Constant', dist='Normal') # Removed show_warning from constructor
+                    garch_results = garch.fit(disp='off', show_warning=False) # show_warning is valid for fit method
 
                     # Forecast conditional volatility (1-step ahead)
                     # The forecast object contains mean, variance, and residual variance.
