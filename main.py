@@ -147,21 +147,24 @@ class FullStockPredictionModel:
         # The look_back used here should also correspond to the one that yielded the best HPs.
         # For now, we'll keep the existing look_back from the class instance.
         # A more advanced setup would load these from a file saved by the tuning script.
+        # Best Hyperparameters for 60-day look-back from tuning:
+        # num_lstm_layers: 1, lstm_units_0: 160, num_dense_layers: 1, dense_units_0: 96,
+        # learning_rate: 0.001, dropout_rate_lstm: 0.2, dropout_rate_dense: 0.1, activation_dense: 'tanh'
         tuned_best_hps = {
-            'num_lstm_layers': 2,       # Example, replace with tuned value
-            'lstm_units_1': 200,        # Example, replace with tuned value
-            'lstm_units_2': 100,        # Example, replace with tuned value (if num_lstm_layers > 1)
-            'num_dense_layers': 1,      # Example, replace with tuned value
-            'dense_units_1': 100,       # Example, replace with tuned value
-            # 'dense_units_2': 50,        # Example (if num_dense_layers > 1)
-            'learning_rate': 0.001,     # Example, replace with tuned value
-            'dropout_rate_lstm': 0.2,   # Example, replace with tuned value
-            'dropout_rate_dense': 0.2,  # Example, replace with tuned value
-            'activation_dense': 'relu'  # Example, replace with tuned value
+            'num_lstm_layers': 1,
+            'lstm_units_1': 160,        # Renamed from lstm_units_0 for consistency with model_params structure
+            # 'lstm_units_2': 100,      # Not applicable as num_lstm_layers is 1
+            'num_dense_layers': 1,
+            'dense_units_1': 96,         # Renamed from dense_units_0
+            # 'dense_units_2': 50,        # Not applicable as num_dense_layers is 1
+            'learning_rate': 0.001,
+            'dropout_rate_lstm': 0.2,
+            'dropout_rate_dense': 0.1,
+            'activation_dense': 'tanh'
         }
         # TODO: Load actual best HPs from the tuning script's output when available.
         # For now, using these placeholders.
-        print(f"\n--- Using Tuned (Placeholder) Hyperparameters for ATT-LSTM ---")
+        print(f"\n--- Using Tuned Hyperparameters for ATT-LSTM (Look-back 60 days) ---")
         for key, value in tuned_best_hps.items():
             print(f"  {key}: {value}")
         print("------------------------------------------------------------")
@@ -499,9 +502,9 @@ if __name__ == '__main__':
     # --- Configuration for Experimental Runs ---
     # General parameters
     run_stock_ticker = '^AEX'
-    run_years_of_data = 3  # Using 3 years for quicker test runs of this main script
-    run_look_back = 60
-    run_epochs = 50         # Reduced epochs for quicker tests
+    run_years_of_data = 3  # Updated to 3 years as per request
+    run_look_back = 60     # Set to best look_back from tuning
+    run_epochs = 50         # Reduced epochs for quicker tests (can be increased for final run)
     run_batch_size = 32
     run_use_differencing = False # Set to True to test with differencing
 

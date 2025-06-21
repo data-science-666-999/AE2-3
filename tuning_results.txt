@@ -1,0 +1,21 @@
+--- Starting KerasTuner Optimization Script ---
+Running with: Look_backs=[30, 60, 90, 120], Years=3, MaxEpochs=81, HB_Iterations=2
+
+--- Running Tuner for Look-Back Period: 30 ---
+Starting hyperparameter tuning for ^AEX using 3 years of data.
+Using look_back_period = 30 for data preparation and model input shape.
+Hyperband: max_epochs=81, iterations=2, early_stopping_patience=10
+Loading raw data for ^AEX from cache: data_cache/^AEX_3_raw_data_2025-06-21.pkl
+Successfully loaded raw data from cache.
+Loading technical indicators for ^AEX from cache: data_cache/^AEX_3_indicators_2025-06-21.pkl
+Successfully loaded technical indicators from cache.
+Applying LASSO feature selection with alpha=0.005...
+Warning: DataFrame columns are a MultiIndex. Flattening columns.
+Target column name updated from 'Close' to 'Close_^AEX' due to column flattening.
+Flattened columns: ['Close_^AEX', 'High_^AEX', 'Low_^AEX', 'Open_^AEX', 'Volume_^AEX', 'DayOfWeek', 'Month', 'SMA_5', 'SMA_10', 'SMA_20', 'SMA_50', 'SMA_100', 'SMA_200', 'EMA_5', 'EMA_10', 'EMA_20', 'EMA_50', 'EMA_100', 'EMA_200', 'MACD', 'MACD_Signal', 'MACD_Diff', 'RSI', 'BB_Upper', 'BB_Middle', 'BB_Lower', 'BB_pband', 'BB_wband', 'ATR', 'OBV', 'Stoch_K', 'Stoch_D', 'Williams_R', 'CCI', 'ROC', 'ADX', 'ADX_Pos', 'ADX_Neg', 'ATR_Normalized', 'Volatility_Ret_5D', 'Volatility_Ret_5D_Raw', 'Volatility_Ret_10D', 'Volatility_Ret_10D_Raw', 'Volatility_Ret_20D', 'Volatility_Ret_20D_Raw', 'Volatility_Ret_60D', 'Volatility_Ret_60D_Raw', 'GARCH_Volatility']
+LASSO selected 24 features out of 47.
+Normalizing data...
+Using MinMaxScaler for target column: Close_^AEX
+Data preprocessing complete.
+Final shape of preprocessed data to be used by model: (766, 25)
+Final columns in preprocessed data (target is last): ['High_^AEX', 'Low_^AEX', 'Volume_^AEX', 'DayOfWeek', 'Month', 'SMA_20', 'SMA_200', 'EMA_5', 'MACD', 'MACD_Diff', 'RSI', 'BB_pband', 'ATR', 'OBV', 'Stoch_K', 'Stoch_D', 'Williams_R', 'CCI', 'ROC', 'ADX', 'ADX_Pos', 'Volatility_Ret_10D', 'Volatility_Ret_10D_Raw', 'Volatility_Ret_60D', 'Close_^AEX']
