@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -504,7 +505,7 @@ if __name__ == '__main__':
     run_stock_ticker = '^AEX'
     run_years_of_data = 3  # Updated to 3 years as per request
     run_look_back = 60     # Set to best look_back from tuning
-    run_epochs = 50         # Reduced epochs for quicker tests (can be increased for final run)
+    run_epochs = 20         # Reduced epochs for quicker tests (can be increased for final run)
     run_batch_size = 32
     run_use_differencing = False # Set to True to test with differencing
 
@@ -617,7 +618,7 @@ if __name__ == '__main__':
                         else:
                             serializable_metrics[k] = v
                     serializable_results[run_key] = serializable_metrics
-                pd.io.json.dump(serializable_results, f, indent=4) # Use pandas json dump for better handling of numpy types potentially
+                json.dump(serializable_results, f, indent=4)
             print(f"\nAll experimental run metrics saved to: {results_json_path}")
         except Exception as e:
             print(f"Error saving metrics to JSON: {e}")
