@@ -491,16 +491,14 @@ if __name__ == '__main__':
     # --- Configuration for Experimental Runs ---
     # General parameters
     run_stock_ticker = '^AEX'
-    run_years_of_data = 3  # Updated to 3 years as per request
-    run_look_back = 60     # Set to best look_back from tuning
-    run_epochs = 20         # Reduced epochs for quicker tests (can be increased for final run)
+    run_years_of_data = 15 # Updated to 15 years as per user request for this run
+    run_look_back = 60     # Kept at 60, assuming HPs were tuned for this
+    run_epochs = 10        # Reduced epochs to avoid timeout, was 50
     run_batch_size = 32
-    run_use_differencing = False # Set to True to test with differencing
+    run_use_differencing = False # Keeping default, user can specify if needed
 
-    # LASSO alpha values to test
-    lasso_alpha_values_to_test = [0.005, 0.01] # Reduced set for quicker tests
-    # To run a single test with a specific alpha:
-    # lasso_alpha_values_to_test = [0.005]
+    # LASSO alpha values to test - running for a single alpha value for this assessment
+    lasso_alpha_values_to_test = [0.005]
 
     all_run_results = {}
     results_df_list = [] # For creating a summary DataFrame
