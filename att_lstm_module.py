@@ -32,20 +32,25 @@ class ATTLSTMModel:
         # Set default values based on the best hyperparameters found by the user.
         # These will be overridden by model_params if keys exist and are different.
         # These are used by build_model if hp object is None (i.e., not tuning).
+        # Simplified model and increased regularization as per new strategy
         self.num_lstm_layers = self.model_params.get('num_lstm_layers', 1)
-        self.lstm_units_1 = self.model_params.get('lstm_units_1', 384)
+        self.lstm_units_1 = self.model_params.get('lstm_units_1', 192) # Reduced from 384
         # lstm_units_2 is defined for completeness but only used if num_lstm_layers > 1
-        self.lstm_units_2 = self.model_params.get('lstm_units_2', 192)
+        self.lstm_units_2 = self.model_params.get('lstm_units_2', 96) # Reduced from 192
 
         self.num_dense_layers = self.model_params.get('num_dense_layers', 1)
-        self.dense_units_1 = self.model_params.get('dense_units_1', 224)
+        self.dense_units_1 = self.model_params.get('dense_units_1', 112) # Reduced from 224
         # dense_units_2 is defined for completeness but only used if num_dense_layers > 1
-        self.dense_units_2 = self.model_params.get('dense_units_2', 128)
+        self.dense_units_2 = self.model_params.get('dense_units_2', 64) # Reduced from 128
 
         self.learning_rate = self.model_params.get('learning_rate', 0.000269656579071362023)
-        self.dropout_rate_lstm = self.model_params.get('dropout_rate_lstm', 0.1)
-        self.dropout_rate_dense = self.model_params.get('dropout_rate_dense', 0.2)
+        self.dropout_rate_lstm = self.model_params.get('dropout_rate_lstm', 0.2) # Increased from 0.1
+        self.dropout_rate_dense = self.model_params.get('dropout_rate_dense', 0.3) # Increased from 0.2
         self.activation_dense = self.model_params.get('activation_dense', 'tanh')
+
+        # L1/L2 Regularization parameters
+        self.l1_reg = self.model_params.get('l1_reg', 0.001)
+        self.l2_reg = self.model_params.get('l2_reg', 0.001)
 
 
     def _create_sequences(self, data, target_column_index):
@@ -75,6 +80,9 @@ class ATTLSTMModel:
             dropout_rate_lstm = hp.Float('dropout_rate_lstm', min_value=0.1, max_value=0.5, step=0.1)
             dropout_rate_dense = hp.Float('dropout_rate_dense', min_value=0.1, max_value=0.5, step=0.1)
             activation_dense = hp.Choice('activation_dense', values=['relu', 'tanh', 'elu'])
+            l1_reg = hp.Float('l1_reg', min_value=1e-5, max_value=1e-2, sampling='log')
+            l2_reg = hp.Float('l2_reg', min_value=1e-5, max_value=1e-2, sampling='log')
+
 
         else: # Use instance attributes (from self.model_params or their defaults)
             num_lstm_layers = self.num_lstm_layers
@@ -89,6 +97,10 @@ class ATTLSTMModel:
             dropout_rate_lstm = self.dropout_rate_lstm
             dropout_rate_dense = self.dropout_rate_dense
             activation_dense = self.activation_dense
+            l1_reg = self.l1_reg
+            l2_reg = self.l2_reg
+
+        kernel_regularizer = tf.keras.regularizers.l1_l2(l1=l1_reg, l2=l2_reg)
 
         inputs = Input(shape=self.input_shape)
         x = inputs
@@ -97,8 +109,9 @@ class ATTLSTMModel:
         # First LSTM layer
         x = LSTM(units=lstm_units_1,
                  return_sequences=True, # Crucial: True if followed by another LSTM or Attention that sees all sequences
-                 dropout=dropout_rate_lstm if hp else 0.0,
-                 recurrent_dropout=dropout_rate_lstm if hp else 0.0
+                 dropout=dropout_rate_lstm, # Applied regardless of hp
+                 recurrent_dropout=dropout_rate_lstm, # Applied regardless of hp
+                 kernel_regularizer=kernel_regularizer
                 )(x)
 
         # Second LSTM layer (optional)
@@ -106,8 +119,9 @@ class ATTLSTMModel:
             # The second (now last) LSTM layer also needs return_sequences=True for the attention mechanism
             x = LSTM(units=lstm_units_2, # lstm_units_2 is defined if num_lstm_layers > 1
                      return_sequences=True,
-                     dropout=dropout_rate_lstm if hp else 0.0,
-                     recurrent_dropout=dropout_rate_lstm if hp else 0.0
+                     dropout=dropout_rate_lstm, # Applied regardless of hp
+                     recurrent_dropout=dropout_rate_lstm, # Applied regardless of hp
+                     kernel_regularizer=kernel_regularizer
                     )(x)
 
         # --- Attention Mechanism (applied to the output of the last LSTM layer) ---
@@ -131,15 +145,19 @@ class ATTLSTMModel:
 
         # Dense layers for prediction
         # First Dense layer
-        x = Dense(units=dense_units_1, activation=activation_dense if hp else 'relu')(x)
-        x = Dropout(dropout_rate_dense if hp else 0.2)(x)
+        x = Dense(units=dense_units_1,
+                  activation=activation_dense,  # Applied regardless of hp
+                  kernel_regularizer=kernel_regularizer)(x)
+        x = Dropout(dropout_rate_dense)(x) # Applied regardless of hp
 
         # Second Dense layer (optional)
         if num_dense_layers > 1:
-            x = Dense(units=dense_units_2, activation=activation_dense if hp else 'relu')(x) # dense_units_2 is defined if num_dense_layers > 1
-            x = Dropout(dropout_rate_dense if hp else 0.2)(x)
+            x = Dense(units=dense_units_2,
+                      activation=activation_dense, # Applied regardless of hp
+                      kernel_regularizer=kernel_regularizer)(x) # dense_units_2 is defined if num_dense_layers > 1
+            x = Dropout(dropout_rate_dense)(x) # Applied regardless of hp
 
-        outputs = Dense(1)(x) # Output a single value for stock price prediction
+        outputs = Dense(1, kernel_regularizer=kernel_regularizer)(x) # Output a single value for stock price prediction
 
         # Create the model object
         model = Model(inputs=inputs, outputs=outputs)
@@ -249,12 +267,12 @@ if __name__ == '__main__':
 
                 # Initialize and build model
                 # Using default units from the class for this test
+                # lstm_units and dense_units are now part of model_params or class defaults
                 att_lstm_test_model = ATTLSTMModel(
                     input_shape=input_shape,
-                    lstm_units=50, # Smaller units for faster test
-                    dense_units=25,
                     look_back=look_back,
                     random_seed=42
+                    # model_params can be passed here to override new defaults for testing if needed
                 )
                 att_lstm_test_model.build_model() # Build with default params
                 print("\nATTLSTM Model Summary (for test):")
