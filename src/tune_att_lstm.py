@@ -3,8 +3,8 @@ import tensorflow as tf
 import numpy as np
 from sklearn.model_selection import train_test_split
 
-from data_preprocessing_module import DataPreprocessor
-from att_lstm_module import ATTLSTMModel
+from .data_preprocessing_module import DataPreprocessor
+from .att_lstm_module import ATTLSTMModel
 
 def build_hypermodel(hp):
     """

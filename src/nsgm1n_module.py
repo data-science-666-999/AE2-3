@@ -5,7 +5,7 @@ import os
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 # Import DataPreprocessor from the sibling module
-from data_preprocessing_module import DataPreprocessor
+from .data_preprocessing_module import DataPreprocessor
 
 # --- Module 3: Cyclic Multidimensional Gray Model (NSGM(1,N)) Module ---
 
@@ -236,9 +236,11 @@ if __name__ == '__main__':
                     plt.ylabel('Value (Scaled)')
                     plt.legend()
                     plt.grid(True)
-                    nsgm_plot_filename = "nsgm_module_preds_vs_actuals.png"
+                    output_dir = os.path.join(os.path.pardir, "module_test_outputs")
+                    os.makedirs(output_dir, exist_ok=True)
+                    nsgm_plot_filename = os.path.join(output_dir, "nsgm_module_preds_vs_actuals.png")
                     plt.savefig(nsgm_plot_filename)
-                    print(f"NSGM predictions vs actuals plot saved as {nsgm_plot_filename} in {os.path.abspath('.')}")
+                    print(f"NSGM predictions vs actuals plot saved as {nsgm_plot_filename}")
                     plt.close()
 
     print("\n--- End of NSGM1NModel Module Test ---")

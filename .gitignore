@@ -25,6 +25,16 @@ VENV/
 
 # Generated plots
 prediction_plots/
+performance_evaluation_report/
+module_test_outputs/
+
+# Cache and tuning artifacts
+data_cache/
+keras_tuner_dir/
+
+# Profiling and log files
+*.prof
+main_run_output.txt
 
 # OS specific
 .DS_Store
