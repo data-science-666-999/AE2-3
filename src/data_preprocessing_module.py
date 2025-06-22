@@ -4,6 +4,7 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.linear_model import Lasso
 # from sklearn.model_selection import train_test_split # No longer needed here for example
 import yfinance as yf
+from statsmodels.tsa.stattools import adfuller # For stationarity testing
 from datetime import datetime, timedelta
 import ta
 import matplotlib.pyplot as plt
@@ -18,15 +19,50 @@ CACHE_DIR = "data_cache"
 # --- Module 1: Data Acquisition and Preprocessing ---
 
 class DataPreprocessor:
-    def __init__(self, stock_ticker='AEL', years_of_data=10, random_seed=42, lasso_alpha=0.005, use_differencing=False): # Default alpha
+    def __init__(self, stock_ticker='AEL', years_of_data=10, random_seed=42, lasso_alpha=0.005, use_differencing=False, auto_differencing_adf=False, adf_significance_level=0.05, use_log_transform=False): # Default alpha
         self.stock_ticker = stock_ticker
         self.years_of_data = years_of_data
         self.random_seed = random_seed
         self.lasso_alpha = lasso_alpha
-        self.use_differencing = use_differencing
-        self.first_price_before_diff = None # To store the value needed for inverse differencing
+        self.use_differencing = use_differencing # Manual override for differencing
+        self.auto_differencing_adf = auto_differencing_adf # ADF-based auto differencing
+        self.adf_significance_level = adf_significance_level
+        self.use_log_transform = use_log_transform # Whether to apply log transform to target
+        self.applied_differencing_order = 0 # To store how many orders of differencing were applied
+        self.values_for_inverse_differencing = [] # To store values needed for reconstruction
+        # self.log_transform_applied will be set in preprocess()
+        self.log_transform_applied_to_target = False
+
+
         np.random.seed(self.random_seed)
         os.makedirs(CACHE_DIR, exist_ok=True) # Ensure cache directory exists
+
+    def _check_stationarity(self, series, significance_level=0.05):
+        """Performs ADF test and returns True if stationary, False otherwise."""
+        if series.empty or series.isnull().all(): # Cannot test empty or all-NaN series
+            print("Warning: Series is empty or all NaN, cannot perform ADF test. Assuming non-stationary.")
+            return False
+
+        # Drop NaNs that might result from prior operations like .diff() before testing
+        series_cleaned = series.dropna()
+        if len(series_cleaned) < 10: # Heuristic: ADF test needs a minimum number of samples
+            print(f"Warning: Series has less than 10 non-NaN values ({len(series_cleaned)}), ADF test might be unreliable. Assuming non-stationary.")
+            return False
+
+        try:
+            adf_result = adfuller(series_cleaned)
+            p_value = adf_result[1]
+            # print(f"ADF Test: Test Statistic: {adf_result[0]}, p-value: {p_value}")
+            if p_value <= significance_level:
+                # print(f"  Series is stationary (p-value {p_value:.4f} <= {significance_level}).")
+                return True  # Reject null hypothesis -> series is stationary
+            else:
+                # print(f"  Series is non-stationary (p-value {p_value:.4f} > {significance_level}).")
+                return False # Fail to reject null hypothesis -> series is non-stationary
+        except Exception as e:
+            print(f"Error during ADF test: {e}. Assuming non-stationary.")
+            return False
+
 
     def _download_yfinance_data(self):
         # Simplified cache naming: ticker_years_raw.pkl
@@ -58,7 +94,7 @@ class DataPreprocessor:
         if df.empty:
             raise ValueError(f"No data downloaded for ticker {self.stock_ticker}. Check ticker symbol or date range.")
 
-        df.rename(columns={'Adj Close': 'Adj_Close'}, inplace=True)
+        df = df.rename(columns={'Adj Close': 'Adj_Close'})
         print(f"Downloaded data shape: {df.shape}")
 
         # Add time-based features before caching raw data with them
@@ -153,8 +189,9 @@ class DataPreprocessor:
 
             # Avoid division by zero or very small close prices if necessary
             df['ATR_Normalized'] = atr_series / close_series.replace(0, np.nan)
-            df['ATR_Normalized'].fillna(method='bfill', inplace=True) # Backfill first for initial NaNs
-            df['ATR_Normalized'].fillna(method='ffill', inplace=True) # Then ffill for any remaining
+            # Replace fillna with method
+            df['ATR_Normalized'] = df['ATR_Normalized'].bfill()
+            df['ATR_Normalized'] = df['ATR_Normalized'].ffill()
 
         # Rolling Standard Deviation of Returns
         df['Returns'] = df['Close'].pct_change() # Calculate daily percentage returns
@@ -195,17 +232,18 @@ class DataPreprocessor:
                     # The forecast is for the next period, so shift variance back to align with current day's features
                     # The variance is for t+1, based on info at t. So, it's a feature for predicting t+1 price.
                     # We shift it to align with the day 't' features.
-                    df['GARCH_Volatility'] = np.nan
+                    df['GARCH_Volatility'] = np.nan # Initialize column
                     # The variance forecast is for the period *after* the last observation in garch_returns.
                     # So, garch_results.conditional_volatility is for in-sample.
                     # forecast.variance.iloc[0] would be the first out-of-sample forecast.
                     # We need in-sample conditional volatility as a feature.
                     # garch_results.conditional_volatility is already aligned with garch_returns's index.
+                    # Use .loc for safe assignment to avoid SettingWithCopyWarning if df is a slice
                     df.loc[garch_returns.index, 'GARCH_Volatility'] = garch_results.conditional_volatility
-                    # Forward fill NaNs at the beginning that GARCH couldn't compute for,
-                    # and also any at the end if the forecast object was used differently.
-                    df['GARCH_Volatility'].fillna(method='bfill', inplace=True)
-                    df['GARCH_Volatility'].fillna(method='ffill', inplace=True) # Fill any remaining
+
+                    # Replace fillna with method and assign back
+                    df['GARCH_Volatility'] = df['GARCH_Volatility'].bfill()
+                    df['GARCH_Volatility'] = df['GARCH_Volatility'].ffill()
                     print("GARCH Volatility feature calculated and added.")
                 except Exception as e:
                     print(f"Error calculating GARCH volatility: {e}. Proceeding without GARCH feature.")
@@ -307,8 +345,8 @@ class DataPreprocessor:
 
         # Return the original df_cleaned (with all features before LASSO but after NaN drop)
         # as well, for potential volatility analysis on original features like ATR.
-        # Also return the list of selected_feature_names.
-        return final_df_for_scaling, selected_feature_names, lasso, df_cleaned # Changed lasso_model to lasso
+        # Also return the list of selected_feature_names and the determined target_column name.
+        return final_df_for_scaling, selected_feature_names, lasso, df_cleaned, target_column
 
     def preprocess(self):
         # Step 1: Get raw data (potentially from cache)
@@ -364,47 +402,97 @@ class DataPreprocessor:
         # For simplicity, assume 'Close' is the primary target. If it gets renamed, LASSO selection handles it.
         raw_target_column = 'Close' # The original name before any potential flattening
 
-        processed_data_for_scaling, selected_features_names, lasso_model, df_with_all_indicators_cleaned = \
+        processed_data_for_scaling, selected_features_names, lasso_model, df_with_all_indicators_cleaned, final_target_column_name = \
             self._apply_lasso_feature_selection(stock_data_with_indicators.copy(), target_column=raw_target_column)
 
         self.lasso_model = lasso_model # Store for access if needed
+        self.final_target_column_name = final_target_column_name # Store for internal use if needed, and for returning
 
         if processed_data_for_scaling.empty:
             print("Preprocessing failed: No data after feature selection.")
-            return pd.DataFrame(), None, [], pd.DataFrame(), None
+            return pd.DataFrame(), None, [], pd.DataFrame(), None, None, None, False # Added log_transform_applied_to_target
+
+        target_col_name_in_df = self.final_target_column_name # Use the determined target name
+
+        # --- Log Transformation (Optional, applied before differencing and scaling) ---
+        self.log_transform_applied_to_target = False
+        if self.use_log_transform:
+            print(f"Applying log1p transformation to target column: {target_col_name_in_df}")
+            # Ensure target values are positive before log transform, handle 0s if any (log1p handles 0)
+            if (processed_data_for_scaling[target_col_name_in_df] < 0).any():
+                print(f"Warning: Target column {target_col_name_in_df} has negative values. Log transform might not be appropriate or will produce NaNs.")
+            processed_data_for_scaling.loc[:, target_col_name_in_df] = np.log1p(processed_data_for_scaling[target_col_name_in_df])
+            self.log_transform_applied_to_target = True
+            # Also apply to df_with_all_indicators_cleaned for consistency if this df is used for inverse transform reference later.
+            if not df_with_all_indicators_cleaned.empty:
+                 if (df_with_all_indicators_cleaned[target_col_name_in_df] < 0).any():
+                      print(f"Warning: Target column {target_col_name_in_df} in df_all_indicators has negative values for log transform.")
+                 df_with_all_indicators_cleaned.loc[:, target_col_name_in_df] = np.log1p(df_with_all_indicators_cleaned[target_col_name_in_df])
+
 
         # --- Differencing (Optional) ---
-        # The target column is the last one in processed_data_for_scaling
-        target_col_name_in_df = processed_data_for_scaling.columns[-1]
+        self.applied_differencing_order = 0
+        self.values_for_inverse_differencing = []
 
-        if self.use_differencing:
-            print(f"Applying differencing to target column: {target_col_name_in_df}")
-            # Store the first value of the original target series for inverse differencing later
-            # This must be from processed_data_for_scaling *before* differencing, but *after* NaN drop and LASSO.
-            self.first_price_before_diff = processed_data_for_scaling[target_col_name_in_df].iloc[0]
+        current_target_series = processed_data_for_scaling[target_col_name_in_df].copy()
 
-            # Perform differencing on the target column
+        if self.auto_differencing_adf:
+            print(f"Auto-differencing enabled for target column: {target_col_name_in_df} using ADF test.")
+            max_diff_order = 2 # Limit to 2 orders of differencing
+            for order in range(1, max_diff_order + 1):
+                is_stationary = self._check_stationarity(current_target_series, self.adf_significance_level)
+                if is_stationary:
+                    print(f"Target series is stationary after {self.applied_differencing_order} order(s) of differencing.")
+                    break
+                else:
+                    if self.applied_differencing_order < max_diff_order:
+                        print(f"Target series non-stationary. Applying {self.applied_differencing_order + 1}-order differencing.")
+                        # Store value(s) needed for inverse transform from the original NON-DIFFERENCED series
+                        # For 1st order: store first value. For 2nd order: store first two values of the 1st-order diffed series, or handle reconstruction carefully.
+                        # Simpler: store the first value of the series *before* this diff operation.
+                        self.values_for_inverse_differencing.append(current_target_series.iloc[0])
+
+                        diff_values = current_target_series.diff()
+                        current_target_series = diff_values.dropna() # Update current_target_series for next iteration or for scaling
+
+                        self.applied_differencing_order += 1
+
+                        # Align processed_data_for_scaling and df_with_all_indicators_cleaned by dropping the first row
+                        processed_data_for_scaling = processed_data_for_scaling.iloc[1:]
+                        if not df_with_all_indicators_cleaned.empty and not processed_data_for_scaling.empty:
+                            df_with_all_indicators_cleaned = df_with_all_indicators_cleaned.loc[processed_data_for_scaling.index]
+                    else:
+                        print(f"Reached max differencing order ({max_diff_order}) but series still non-stationary. Proceeding with current series.")
+                        break # Exit loop if max order reached
+
+            if not self._check_stationarity(current_target_series, self.adf_significance_level) and self.applied_differencing_order == max_diff_order:
+                 print(f"Warning: Target series may still be non-stationary after {max_diff_order} differencing orders.")
+
+            # Update the target column in processed_data_for_scaling with the final differenced values (if any)
+            if self.applied_differencing_order > 0:
+                processed_data_for_scaling.loc[:, target_col_name_in_df] = current_target_series.values
+                print(f"Shape after {self.applied_differencing_order}-order auto-differencing: {processed_data_for_scaling.shape}")
+
+        elif self.use_differencing: # Manual differencing (1st order only as per original logic)
+            print(f"Applying 1st order manual differencing to target column: {target_col_name_in_df}")
+            self.values_for_inverse_differencing.append(processed_data_for_scaling[target_col_name_in_df].iloc[0])
+
             diff_values = processed_data_for_scaling[target_col_name_in_df].diff().dropna()
+            self.applied_differencing_order = 1
 
-            # Update the target column in processed_data_for_scaling with differenced values
-            # Align indices: the first row will be NaN due to diff, so drop it from the whole df
             processed_data_for_scaling = processed_data_for_scaling.iloc[1:]
-            processed_data_for_scaling.loc[:, target_col_name_in_df] = diff_values.values # Use .loc to avoid SettingWithCopyWarning
-
-            print(f"Shape after differencing and dropping first row: {processed_data_for_scaling.shape}")
-            # Also adjust df_with_all_indicators_cleaned to match the new index if differencing is applied
+            processed_data_for_scaling.loc[:, target_col_name_in_df] = diff_values.values
+            print(f"Shape after 1st order manual differencing: {processed_data_for_scaling.shape}")
             if not df_with_all_indicators_cleaned.empty and not processed_data_for_scaling.empty:
                  df_with_all_indicators_cleaned = df_with_all_indicators_cleaned.loc[processed_data_for_scaling.index]
 
-
         # --- Scaling ---
         print("Normalizing data...")
-        # For features, always use MinMaxScaler for now
-        feature_scaler = MinMaxScaler(feature_range=(0, 1))
+        feature_scaler = MinMaxScaler(feature_range=(0, 1)) # For features
 
-        # For target, use StandardScaler if differenced, else MinMaxScaler
-        if self.use_differencing:
-            print(f"Using StandardScaler for differenced target column: {target_col_name_in_df}")
+        # For target, use StandardScaler if any differencing was applied, else MinMaxScaler
+        if self.applied_differencing_order > 0:
+            print(f"Using StandardScaler for differenced target column: {target_col_name_in_df} (order: {self.applied_differencing_order})")
             target_scaler = StandardScaler()
         else:
             print(f"Using MinMaxScaler for target column: {target_col_name_in_df}")
@@ -438,25 +526,29 @@ class DataPreprocessor:
         if not scaled_df.empty:
             print("Final columns in preprocessed data (target is last):", scaled_df.columns.tolist())
 
-        # Return scaled_df, the scaler for the target, selected_features_names, and df_with_all_indicators_cleaned
-        # Also return self.first_price_before_diff if differencing was used.
-        return scaled_df, target_scaler, selected_features_names, df_with_all_indicators_cleaned, self.first_price_before_diff
+        # Return scaled_df, the scaler for the target, selected_features_names, df_with_all_indicators_cleaned,
+        # applied_differencing_order, values_for_inverse_differencing, final_target_column_name, and log_transform_applied_to_target
+        return scaled_df, target_scaler, selected_features_names, df_with_all_indicators_cleaned, self.applied_differencing_order, self.values_for_inverse_differencing, self.final_target_column_name, self.log_transform_applied_to_target
 
 
 # Example Usage (for testing the module)
 if __name__ == '__main__':
-    # Test case 1: No differencing
-    print("\n--- Testing DataPreprocessor without differencing ---")
-    preprocessor_no_diff = DataPreprocessor(stock_ticker='AAPL', years_of_data=1, use_differencing=False)
+    # Test case 1: No differencing, no log transform
+    print("\n--- Testing DataPreprocessor: No Diff, No Log ---")
+    preprocessor_no_diff_no_log = DataPreprocessor(stock_ticker='AAPL', years_of_data=1, use_differencing=False, auto_differencing_adf=False, use_log_transform=False)
     try:
-        processed_df_no_diff, target_scaler_no_diff, selected_features_no_diff, df_all_indicators_no_diff, first_val_no_diff = preprocessor_no_diff.preprocess()
-        if not processed_df_no_diff.empty:
-            print(f"  Processed DF shape (no diff): {processed_df_no_diff.shape}")
-            print(f"  Target scaler type (no diff): {type(target_scaler_no_diff)}")
-            print(f"  First value for inv diff (no diff): {first_val_no_diff}") # Should be None
+        # Update example usage to expect 8 return values
+        processed_df, scaler, _, _, diff_order, inv_diff_vals, target_name, log_applied = preprocessor_no_diff_no_log.preprocess()
+        if not processed_df.empty:
+            print(f"  Processed DF shape: {processed_df.shape}")
+            print(f"  Target scaler type: {type(scaler)}")
+            print(f"  Final target name: {target_name}")
+            print(f"  Applied differencing order: {diff_order}")
+            print(f"  Values for inv diff: {inv_diff_vals}")
+            print(f"  Log transform applied: {log_applied}")
             # Example of inverse transform for non-differenced data
             if target_scaler_no_diff and processed_df_no_diff.shape[1] > 0 : # Check if there's a target column
-                target_col_name = processed_df_no_diff.columns[-1]
+                target_col_name = processed_df_no_diff.columns[-1] # This is the scaled target
                 dummy_scaled_target = processed_df_no_diff[[target_col_name]].iloc[[0]].copy() # Get first scaled target value
                 original_target_val = target_scaler_no_diff.inverse_transform(dummy_scaled_target)
                 print(f"  Example inverse transform (no diff) of {dummy_scaled_target.iloc[0,0]:.4f} -> {original_target_val[0,0]:.4f}")
@@ -468,29 +560,27 @@ if __name__ == '__main__':
         import traceback
         traceback.print_exc()
 
-    # Test case 2: With differencing
-    print("\n--- Testing DataPreprocessor WITH differencing ---")
-    preprocessor_with_diff = DataPreprocessor(stock_ticker='AAPL', years_of_data=1, use_differencing=True)
+    # Test case 2: With manual differencing, no log transform
+    print("\n--- Testing DataPreprocessor: Manual Diff, No Log ---")
+    preprocessor_manual_diff = DataPreprocessor(stock_ticker='AAPL', years_of_data=1, use_differencing=True, auto_differencing_adf=False, use_log_transform=False)
     try:
-        processed_df_with_diff, target_scaler_with_diff, selected_features_with_diff, df_all_indicators_with_diff, first_val_with_diff = preprocessor_with_diff.preprocess()
-        if not processed_df_with_diff.empty:
-            print(f"  Processed DF shape (with diff): {processed_df_with_diff.shape}")
-            print(f"  Target scaler type (with diff): {type(target_scaler_with_diff)}")
-            print(f"  First value for inv diff (with diff): {first_val_with_diff}") # Should have a value
-            # Example of inverse transform for differenced data
-            if target_scaler_with_diff and first_val_with_diff is not None and processed_df_with_diff.shape[1] > 0:
-                target_col_name = processed_df_with_diff.columns[-1]
-                dummy_scaled_diff_target = processed_df_with_diff[[target_col_name]].iloc[[0]].copy()
-                original_diff_val = target_scaler_with_diff.inverse_transform(dummy_scaled_diff_target)
-                # To get original price: first_price_before_diff + cumsum(original_diff_values)
-                # For a single value: last_actual_price + original_diff_val
-                # Here, we only have the first scaled diff, so its inverse is the first original diff.
-                # The "original price" would be first_val_with_diff + original_diff_val[0,0]
-                reconstructed_price = first_val_with_diff + original_diff_val[0,0]
-                print(f"  Example inverse transform (with diff) of scaled_diff {dummy_scaled_diff_target.iloc[0,0]:.4f} -> original_diff {original_diff_val[0,0]:.4f}")
-                print(f"  Reconstructed price for this first diff: {first_val_with_diff:.2f} (first price) + {original_diff_val[0,0]:.4f} (first diff) = {reconstructed_price:.4f}")
+        processed_df, scaler, _, _, diff_order, inv_diff_vals, target_name, log_applied = preprocessor_manual_diff.preprocess()
+        if not processed_df.empty:
+            print(f"  Processed DF shape: {processed_df.shape}")
+            print(f"  Target scaler type: {type(scaler)}")
+            print(f"  Final target name: {target_name}")
+            print(f"  Applied differencing order: {diff_order}")
+            print(f"  Values for inv diff: {inv_diff_vals}")
+            print(f"  Log transform applied: {log_applied}")
+            if scaler and inv_diff_vals and diff_order > 0 and processed_df.shape[1] > 0:
+                target_col_name_in_df = processed_df.columns[-1]
+                dummy_scaled_diff_target = processed_df[[target_col_name_in_df]].iloc[[0]].copy()
+                original_diff_val = scaler.inverse_transform(dummy_scaled_diff_target)
+                reconstructed_price = inv_diff_vals[0] + original_diff_val[0,0] # Simple 1st order inv
+                print(f"  Example inverse transform of scaled_diff {dummy_scaled_diff_target.iloc[0,0]:.4f} -> original_diff {original_diff_val[0,0]:.4f}")
+                print(f"  Reconstructed price: {inv_diff_vals[0]:.2f} + {original_diff_val[0,0]:.4f} = {reconstructed_price:.4f}")
         else:
-            print("  Preprocessing (with diff) returned an empty DataFrame.")
+            print("  Preprocessing returned an empty DataFrame.")
     except Exception as e:
         print(f"  Error during with_diff preprocessing test: {e}")
         import traceback

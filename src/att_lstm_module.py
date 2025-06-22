@@ -15,14 +15,44 @@ import os
 from .data_preprocessing_module import DataPreprocessor
 
 
+# --- Custom Loss Function ---
+def weighted_mse_loss(y_true, y_pred, underprediction_penalty=2.0):
+    """
+    Custom Mean Squared Error loss function that penalizes underpredictions more.
+    y_true: True labels
+    y_pred: Predicted labels
+    underprediction_penalty: Factor by which to multiply loss for underpredictions.
+    """
+    error = y_true - y_pred
+    # Underprediction: y_true > y_pred  => error > 0
+    # Overprediction:  y_true < y_pred  => error < 0
+
+    # Cast to float32 to match typical tensor types
+    penalty_tensor = tf.cast(underprediction_penalty, dtype=y_pred.dtype)
+
+    # Condition for applying penalty
+    is_underprediction = tf.greater(error, 0)
+
+    # Calculate squared error
+    squared_error = tf.square(error)
+
+    # Apply penalty: if underprediction, multiply by penalty, else by 1.0
+    weighted_squared_error = tf.where(is_underprediction,
+                                      squared_error * penalty_tensor,
+                                      squared_error)
+
+    return tf.reduce_mean(weighted_squared_error)
+
+
 # --- Module 2: Attention-Enhanced LSTM (ATT-LSTM) Module ---
 
 class ATTLSTMModel:
-    def __init__(self, input_shape, look_back=60, random_seed=42, model_params=None):
+    def __init__(self, input_shape, look_back=60, random_seed=42, model_params=None, loss_function_name='mse'):
         self.input_shape = input_shape  # (timesteps, features)
         self.look_back = look_back
         self.model = None
         self.random_seed = random_seed
+        self.loss_function_name = loss_function_name # 'mse' or 'weighted_mse'
         tf.random.set_seed(self.random_seed)
         np.random.seed(self.random_seed)
 
@@ -162,8 +192,19 @@ class ATTLSTMModel:
         # Create the model object
         model = Model(inputs=inputs, outputs=outputs)
 
-        # Compile the model with the potentially tuned learning rate
-        model.compile(optimizer=Adam(learning_rate=learning_rate), loss="mse")
+        # Determine loss function
+        if self.loss_function_name == 'weighted_mse':
+            loss_to_use = weighted_mse_loss
+            print("Compiling model with custom weighted_mse_loss.")
+        elif self.loss_function_name == 'mse':
+            loss_to_use = "mse"
+            print("Compiling model with standard mse loss.")
+        else:
+            print(f"Warning: Unknown loss function '{self.loss_function_name}'. Defaulting to 'mse'.")
+            loss_to_use = "mse"
+
+        # Compile the model with the potentially tuned learning rate and selected loss
+        model.compile(optimizer=Adam(learning_rate=learning_rate), loss=loss_to_use)
 
         # If build_model is called directly (not by KerasTuner),
         # it should still assign the created model to self.model
