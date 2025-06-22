@@ -104,9 +104,11 @@ if __name__ == '__main__':
         for i, weight in enumerate(ensemble_model_optimized.weights):
             plt.text(i, weight + 0.02, f"{weight:.3f}", ha='center')
 
-        plot_filename = "ensemble_module_optimized_weights.png"
+        output_dir = os.path.join(os.path.pardir, "module_test_outputs")
+        os.makedirs(output_dir, exist_ok=True)
+        plot_filename = os.path.join(output_dir, "ensemble_module_optimized_weights.png")
         plt.savefig(plot_filename)
-        print(f"   Optimized weights plot saved as {plot_filename} in {os.path.abspath('.')}")
+        print(f"   Optimized weights plot saved as {plot_filename}")
         plt.close()
 
     # Simulate test predictions from ATT-LSTM and NSGM

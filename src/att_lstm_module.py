@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import os
 
 # Import DataPreprocessor from the sibling module
-from data_preprocessing_module import DataPreprocessor
+from .data_preprocessing_module import DataPreprocessor
 
 
 # --- Module 2: Attention-Enhanced LSTM (ATT-LSTM) Module ---
@@ -318,9 +318,12 @@ if __name__ == '__main__':
                 plt.ylabel('Loss (MSE)')
                 plt.legend()
                 plt.grid(True)
-                loss_plot_filename = "att_lstm_module_loss_curve.png"
+                # Save plots to a directory outside src for module tests
+                output_dir = os.path.join(os.path.pardir, "module_test_outputs")
+                os.makedirs(output_dir, exist_ok=True)
+                loss_plot_filename = os.path.join(output_dir, "att_lstm_module_loss_curve.png")
                 plt.savefig(loss_plot_filename)
-                print(f"Loss curve plot saved as {loss_plot_filename} in {os.path.abspath('.')}")
+                print(f"Loss curve plot saved as {loss_plot_filename}")
                 plt.close()
 
                 # 2. Plot predictions vs. actuals for a sample from the test set
@@ -333,9 +336,12 @@ if __name__ == '__main__':
                 plt.ylabel('Value (Scaled)')
                 plt.legend()
                 plt.grid(True)
-                preds_plot_filename = "att_lstm_module_preds_vs_actuals.png"
+                # Save plots to a directory outside src for module tests
+                output_dir = os.path.join(os.path.pardir, "module_test_outputs") # Ensure output_dir is defined or recalculated
+                os.makedirs(output_dir, exist_ok=True)
+                preds_plot_filename = os.path.join(output_dir, "att_lstm_module_preds_vs_actuals.png")
                 plt.savefig(preds_plot_filename)
-                print(f"Predictions vs actuals plot saved as {preds_plot_filename} in {os.path.abspath('.')}")
+                print(f"Predictions vs actuals plot saved as {preds_plot_filename}")
                 plt.close()
 
     print("\n--- End of ATTLSTMModel Module Test ---")
