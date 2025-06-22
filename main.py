@@ -148,45 +148,33 @@ class FullStockPredictionModel:
         # The look_back used here should also correspond to the one that yielded the best HPs.
         # For now, we'll keep the existing look_back from the class instance.
         # A more advanced setup would load these from a file saved by the tuning script.
-        # Best Hyperparameters for 60-day look-back from tuning:
-        # num_lstm_layers: 1, lstm_units_0: 160, num_dense_layers: 1, dense_units_0: 96,
-        # learning_rate: 0.001, dropout_rate_lstm: 0.2, dropout_rate_dense: 0.1, activation_dense: 'tanh'
-        tuned_best_hps = {
-            'num_lstm_layers': 1,
-            'lstm_units_1': 160,        # Renamed from lstm_units_0 for consistency with model_params structure
-            # 'lstm_units_2': 100,      # Not applicable as num_lstm_layers is 1
-            'num_dense_layers': 1,
-            'dense_units_1': 96,         # Renamed from dense_units_0
-            # 'dense_units_2': 50,        # Not applicable as num_dense_layers is 1
-            'learning_rate': 0.001,
-            'dropout_rate_lstm': 0.2,
-            'dropout_rate_dense': 0.1,
-            'activation_dense': 'tanh'
-        }
-        # TODO: Load actual best HPs from the tuning script's output when available.
-        # For now, using these placeholders.
-        print(f"\n--- Using Tuned Hyperparameters for ATT-LSTM (Look-back 60 days) ---")
-        for key, value in tuned_best_hps.items():
-            print(f"  {key}: {value}")
-        print("------------------------------------------------------------")
+        # The ATTLSTMModel will now use its internal defaults which have been updated
+        # with the best hyperparameters found by the user.
+        # No need to pass model_params if we want to use those defaults.
+        # If a specific set of HPs for a specific run different from new defaults is needed,
+        # then model_params should be populated and passed.
+        # For this task, the goal is to use the user-provided HPs as the new standard.
+        print(f"\n--- Initializing ATT-LSTM with updated default hyperparameters ---")
         print(f"--- Final Training Parameters for ATT-LSTM ---")
         print(f"  Epochs: {epochs}")
         print(f"  Batch Size: {batch_size}")
         print(f"  Look_back: {self.look_back}") # Display the look_back being used
+        print(f"  Years of Data for training: {self.years_of_data}")
+        print("  (Model will use hyperparameters set in att_lstm_module.py)")
         print("------------------------------------------------------------")
 
         input_shape_lstm = (X_train_seq.shape[1], X_train_seq.shape[2]) # (timesteps, features)
 
-        # Instantiate ATTLSTMModel with the tuned HPs
+        # Instantiate ATTLSTMModel. It will use the new defaults set in its __init__.
         self.att_lstm_model = ATTLSTMModel(
             input_shape=input_shape_lstm,
-            look_back=self.look_back, # This look_back should align with the one used for tuning
-            random_seed=self.random_seed,
-            model_params=tuned_best_hps # Pass the dictionary here
+            look_back=self.look_back,
+            random_seed=self.random_seed
+            # No model_params are passed, so it uses the defaults updated in att_lstm_module.py
         )
 
-        # Build the model using these parameters
-        self.att_lstm_model.build_model() # Since hp=None, it will use model_params
+        # Build the model using its internal (now updated) default parameters
+        self.att_lstm_model.build_model() # Since hp=None and no model_params, it will use its internal defaults.
 
         # Train the model
         print("Starting ATT-LSTM Model Training...")

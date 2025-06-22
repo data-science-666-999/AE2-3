@@ -29,21 +29,23 @@ class ATTLSTMModel:
         # Store model parameters if provided, otherwise use defaults in build_model
         self.model_params = model_params if model_params else {}
 
-        # Set default values for parameters that might be passed in model_params
-        # These will be overridden by model_params if keys exist,
-        # and used by build_model if hp object is None.
-        self.lstm_units_1 = self.model_params.get('lstm_units_1', 64)
-        self.lstm_units_2 = self.model_params.get('lstm_units_2', 64) # Default for potential second layer
+        # Set default values based on the best hyperparameters found by the user.
+        # These will be overridden by model_params if keys exist and are different.
+        # These are used by build_model if hp object is None (i.e., not tuning).
         self.num_lstm_layers = self.model_params.get('num_lstm_layers', 1)
+        self.lstm_units_1 = self.model_params.get('lstm_units_1', 384)
+        # lstm_units_2 is defined for completeness but only used if num_lstm_layers > 1
+        self.lstm_units_2 = self.model_params.get('lstm_units_2', 192)
 
-        self.dense_units_1 = self.model_params.get('dense_units_1', 32)
-        self.dense_units_2 = self.model_params.get('dense_units_2', 32) # Default for potential second layer
         self.num_dense_layers = self.model_params.get('num_dense_layers', 1)
+        self.dense_units_1 = self.model_params.get('dense_units_1', 224)
+        # dense_units_2 is defined for completeness but only used if num_dense_layers > 1
+        self.dense_units_2 = self.model_params.get('dense_units_2', 128)
 
-        self.learning_rate = self.model_params.get('learning_rate', 0.001)
-        self.dropout_rate_lstm = self.model_params.get('dropout_rate_lstm', 0.2)
+        self.learning_rate = self.model_params.get('learning_rate', 0.000269656579071362023)
+        self.dropout_rate_lstm = self.model_params.get('dropout_rate_lstm', 0.1)
         self.dropout_rate_dense = self.model_params.get('dropout_rate_dense', 0.2)
-        self.activation_dense = self.model_params.get('activation_dense', 'relu')
+        self.activation_dense = self.model_params.get('activation_dense', 'tanh')
 
 
     def _create_sequences(self, data, target_column_index):
